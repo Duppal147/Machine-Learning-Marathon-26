@@ -1,0 +1,10 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+# large downloaded PDFs and generated parse output — not committed
+documents/
+
+# private competition/benchmark data (contains answer key)
+WattBot2026/
