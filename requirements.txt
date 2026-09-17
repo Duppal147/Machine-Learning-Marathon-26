@@ -1,7 +1,0 @@
-openai>=1.0
-pandas
-requests
-tqdm
-PyMuPDF
-chromadb
-pytest
