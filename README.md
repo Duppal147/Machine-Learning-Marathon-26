@@ -24,7 +24,8 @@ python scripts/vector_index.py index --strategy hybrid  # embed + store in docum
 python scripts/vector_index.py search "How much water did US data centers consume in 2023?"
 ```
 
-Design notes and retrieval results are in [docs/chunking_design.md](docs/chunking_design.md).
+Step-by-step instructions (which scripts to run, in what order): [docs/pipeline_runbook.md](docs/pipeline_runbook.md).
+Design notes and retrieval results: [docs/chunking_design.md](docs/chunking_design.md).
 
 ## Sharing the processed corpus (skip parsing and embedding)
 
