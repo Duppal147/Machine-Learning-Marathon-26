@@ -2,14 +2,15 @@
 """Compare chunking strategies by retrieval quality on WattBot train questions.
 
 Usage:
-    python scripts/eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|embed]
-                             [--embed-model MODEL] [--base-url URL]
+    python scripts/eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|chroma]
+                             [--no-query-instruction]
 
 Chunks are rebuilt from documents/parsed_json for each strategy. Only questions whose
 gold documents have been parsed are scored. Per-question results (for failure analysis)
 go to documents/eval/<strategy>__<retriever>.csv.
 
-For --retriever embed, set OPENAI_API_KEY (and --base-url or OPENAI_BASE_URL for the gateway).
+--retriever chroma embeds with the configured Qwen model (needs OPENAI_API_KEY + UW VPN) and
+reuses the persisted index in documents/chroma, so only new or changed chunks are embedded.
 """
 import argparse
 import csv
@@ -20,7 +21,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wattbot.chunking import REGISTRY, build_pipeline
-from wattbot.eval import OpenAIEmbeddingRetriever, TfidfRetriever, evaluate, load_questions
+from wattbot.embeddings import EmbeddingConfigurationError
+from wattbot.eval import ChromaRetriever, TfidfRetriever, evaluate, load_questions
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
@@ -28,22 +30,20 @@ COLUMNS = ["doc_recall@1", "doc_recall@5", "passage_recall@1", "passage_recall@5
            "passage_recall@20", "passage_mrr", "ctx_tokens@5"]
 
 
-def make_retriever(args):
+def make_retriever(args, strategy):
     if args.retriever == "tfidf":
         return TfidfRetriever()
-    return OpenAIEmbeddingRetriever(model=args.embed_model, base_url=args.base_url)
+    return ChromaRetriever(strategy, query_instruction=not args.no_query_instruction)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--strategies", nargs="+", default=sorted(REGISTRY), choices=sorted(REGISTRY))
-    parser.add_argument("--retriever", default="tfidf", choices=["tfidf", "embed"])
-    parser.add_argument("--embed-model")
-    parser.add_argument("--base-url")
+    parser.add_argument("--retriever", default="tfidf", choices=["tfidf", "chroma"])
+    parser.add_argument("--no-query-instruction", action="store_true",
+                        help="chroma: embed raw questions without the Qwen query instruction")
     parser.add_argument("--max-tokens", type=int)
     args = parser.parse_args()
-    if args.retriever == "embed" and not args.embed_model:
-        parser.error("--retriever embed requires --embed-model")
 
     questions = load_questions()
     paths = sorted(PARSED_DIR.glob("*.json"))
@@ -52,7 +52,7 @@ def main():
     rows = []
     for strategy in args.strategies:
         chunks = build_pipeline(strategy, max_tokens=args.max_tokens).run(paths)
-        retriever = make_retriever(args)
+        retriever = make_retriever(args, strategy)
         summary, results = evaluate(chunks, questions, retriever)
         rows.append((strategy, summary))
 
@@ -75,4 +75,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except EmbeddingConfigurationError as error:
+        sys.exit(f"error: {error} (see README: BadgerBrain gateway setup)")
