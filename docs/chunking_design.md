@@ -237,6 +237,24 @@ hits[0].chunk_id, hits[0].score, hits[0].metadata["ref_id"], hits[0].metadata["p
 
 Rough size for the full corpus: ~15–20k chunks × 4096 float32 ≈ 250–330 MB, and ~1,000–1,300 gateway calls for a first full index.
 
+### Sharing snapshots with the team
+
+`documents/` is gitignored, so `src/wattbot/snapshot.py` packages what is slow or costly to rebuild into one `.tar.gz`, published as a GitHub Release `index-<timestamp>` (see the README for commands):
+- `documents/parsed_json/`, with Docling's base64 figure images stripped. That's ~92% of the JSON size, and the chunker never reads it. Chunks rebuilt from stripped JSON are identical.
+- `documents/chunks/*.jsonl`
+- `documents/chroma/`, skipped if it holds no vectors yet
+- `WattBot2026/metadata_downloaded.csv`
+- `manifest.json`, recording the source commit, the chromadb version, the embedding model, and document, chunk and vector counts
+
+**Installing** (`fetch_index.py`):
+- Checks the archive's sha256.
+- Only accepts paths under those locations, with no `..` or absolute paths, and uses tarfile's `data` filter.
+- Never overwrites local data unless run with `--force`, which first renames existing folders to `*.bak-<timestamp>`.
+
+Because indexing is incremental, anyone who installs a snapshot and then re-chunks or adds documents only embeds what changed.
+
+The 5-document snapshot is 1.4 MB.
+
 ### Evaluating retrieval (comparing strategies)
 
 ```bash

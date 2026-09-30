@@ -24,4 +24,22 @@ python scripts/vector_index.py index --strategy hybrid  # embed + store in docum
 python scripts/vector_index.py search "How much water did US data centers consume in 2023?"
 ```
 
-Design notes and retrieval results are in [docs/chunking_design.md](docs/chunking_design.md).
+Step-by-step instructions (which scripts to run, in what order): [docs/pipeline_runbook.md](docs/pipeline_runbook.md).
+Design notes and retrieval results: [docs/chunking_design.md](docs/chunking_design.md).
+
+## Sharing the processed corpus (skip parsing and embedding)
+
+`documents/` is gitignored, so the parsed JSON, chunks and Chroma index are shared as snapshots
+published as GitHub Releases (`index-<timestamp>`) on this repo:
+
+```bash
+python scripts/fetch_index.py --list      # available snapshots
+python scripts/fetch_index.py             # install the latest into documents/ (no GitHub login needed)
+python scripts/fetch_index.py --force     # replace existing local data (kept as *.bak-<timestamp>)
+
+python scripts/publish_index.py           # build documents/snapshots/wattbot-index-<ts>.tar.gz
+python scripts/publish_index.py --upload  # ... and publish it (needs `gh auth login` + write access)
+```
+
+Snapshots include full document text and this repo is public, so anyone can download them.
+Everyone should use the chromadb version pinned in `uv.lock`, since the index files are version-specific.
