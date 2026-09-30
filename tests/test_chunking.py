@@ -1,13 +1,16 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from rag.chunking import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from wattbot.chunking import (
     Block, ChunkStore, DoclingJsonLoader, DropSections, FixedSizeChunker, HybridChunker,
     approx_tokens, build_pipeline,
 )
-from rag.chunking.loaders import HeadingTracker
+from wattbot.chunking.loaders import HeadingTracker
 
 PARSED_DIR = Path("documents/parsed_json")
 

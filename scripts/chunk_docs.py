@@ -2,17 +2,21 @@
 """Chunk parsed documents into documents/chunks/<strategy>.jsonl.
 
 Usage:
-    python chunk_docs.py [--strategy hybrid] [--max-tokens 400] [doc_id ...]
+    python scripts/chunk_docs.py [--strategy hybrid] [--max-tokens 400] [doc_id ...]
 
 With no doc_ids, every file in documents/parsed_json is chunked.
-Strategies are defined in rag/chunking/pipeline.py (REGISTRY).
+Strategies are defined in src/wattbot/chunking/pipeline.py (REGISTRY).
 """
 import argparse
+import os
 import statistics
 from collections import Counter
+import sys
 from pathlib import Path
 
-from rag.chunking import REGISTRY, ChunkStore, approx_tokens, build_pipeline
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from wattbot.chunking import REGISTRY, ChunkStore, approx_tokens, build_pipeline
 
 PARSED_DIR = Path("documents/parsed_json")
 CHUNKS_OUT = Path("documents/chunks")

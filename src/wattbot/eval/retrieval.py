@@ -23,8 +23,8 @@ from typing import Protocol
 
 import numpy as np
 
-from rag.chunking import Chunk
-from rag.chunking.chunkers import approx_tokens
+from ..chunking import Chunk
+from ..chunking.chunkers import approx_tokens
 
 TRAIN_QA = Path("WattBot2026/train_QA.csv")
 PASSAGE_THRESHOLD = 0.7  # fraction of an evidence segment's words that must appear, in order, in a chunk

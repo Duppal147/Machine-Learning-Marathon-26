@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+# downloaded PDFs, Docling output, chunks and eval results (regenerate with scripts/)
+documents/
+# local copy of the Kaggle competition download
+WattBot2026/
