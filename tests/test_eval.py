@@ -6,7 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wattbot.chunking import Chunk, CorpusMetadataEnricher, Document
-from wattbot.eval import Question, TfidfRetriever, evaluate, evidence_coverage, extract_evidence, load_questions
+from wattbot.eval import ChromaRetriever, Question, TfidfRetriever, evaluate, evidence_coverage, extract_evidence, load_questions
 
 
 def test_extract_evidence_prefers_long_quotes_and_splits_elisions():
@@ -70,6 +70,35 @@ def test_evaluate_scores_doc_and_passage_ranks():
     assert summary["doc_recall@1"] == 1.0
     assert summary["passage_recall@1"] == 1.0
     assert results[0].passage_rank == 1 and results[0].top_chunk_ids[0] == "c1"
+
+
+def _word_overlap_embedder(texts):
+    """Fake dense embedder: one dimension per vocabulary word (no gateway needed)."""
+    vocab = ["water", "gallons", "data", "center", "solar", "sunlight", "wind", "turbines", "power", "air"]
+    vecs = [[float(w in t.lower()) for w in vocab] for t in texts]
+    return [v if any(v) else [1e-3] * len(vocab) for v in vecs]
+
+
+def test_evaluate_with_chroma_retriever(tmp_path):
+    from wattbot.vectorstore import ChunkVectorStore
+
+    chunks = [
+        _chunk(0, "a2024", "Solar panels convert sunlight into electricity with modest efficiency."),
+        _chunk(1, "a2024", "The data center consumed 1.9 billion gallons of water per day in total."),
+        _chunk(2, "b2024", "Wind turbines generate power from moving air across large blades."),
+    ]
+    store = ChunkVectorStore("toy", path=tmp_path, model="fake", embed_fn=_word_overlap_embedder)
+    store.index([_chunk(9, "a2024", "stale chunk about water from an older run")])  # not in the fitted set
+    questions = [Question("q1", "How many gallons of water did the data center use?", ["a2024"],
+                          ["data center consumed 1.9 billion gallons of water per day"])]
+
+    retriever = ChromaRetriever("toy", query_instruction=False, store=store)
+    summary, results = evaluate(chunks, questions, retriever, ks=(1, 2))
+    assert results[0].top_chunk_ids[0] == "c1"
+    assert "c9" not in results[0].top_chunk_ids  # stale ids are dropped
+    assert summary["passage_recall@1"] == 1.0
+    assert retriever.name == "chroma_fake_noinstr"
+    assert store.index(chunks).embedded == 0   # fit already indexed everything
 
 
 @pytest.mark.skipif(not Path("WattBot2026/train_QA.csv").exists(), reason="WattBot data not available")

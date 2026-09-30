@@ -14,7 +14,6 @@ numbers are comparable across strategies but grow in coverage as more PDFs are p
 """
 import ast
 import csv
-import os
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -23,6 +22,7 @@ from typing import Protocol
 
 import numpy as np
 
+from .. import config
 from ..chunking import Chunk
 from ..chunking.chunkers import approx_tokens
 
@@ -119,8 +119,8 @@ def evidence_coverage(segment: str, chunk_text: str) -> float:
 class Retriever(Protocol):
     name: str
 
-    def fit(self, texts: list[str]) -> None: ...
-    def search(self, queries: list[str], k: int) -> list[list[int]]: ...
+    def fit(self, chunks: list[Chunk]) -> None: ...
+    def search(self, queries: list[str], k: int) -> list[list[int]]: ...  # indices into the fitted chunks
 
 
 class TfidfRetriever:
@@ -128,43 +128,37 @@ class TfidfRetriever:
 
     name = "tfidf"
 
-    def fit(self, texts: list[str]) -> None:
+    def fit(self, chunks: list[Chunk]) -> None:
         from sklearn.feature_extraction.text import TfidfVectorizer
         self.vectorizer = TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2), min_df=1, stop_words="english")
-        self.matrix = self.vectorizer.fit_transform(texts)
+        self.matrix = self.vectorizer.fit_transform([c.embed_text for c in chunks])
 
     def search(self, queries: list[str], k: int) -> list[list[int]]:
         scores = (self.vectorizer.transform(queries) @ self.matrix.T).toarray()
         return [list(np.argsort(-row)[:k]) for row in scores]
 
 
-class OpenAIEmbeddingRetriever:
-    """Dense retrieval through any OpenAI-compatible /embeddings endpoint (e.g. the UW gateway).
+class ChromaRetriever:
+    """Dense retrieval from the persisted ChromaDB index (wattbot.vectorstore).
 
-    Reads OPENAI_API_KEY from the environment. Embeddings are recomputed each run.
+    `fit` indexes the chunks incrementally, so only chunks that are new or changed since
+    the last run are embedded. Hits for chunk ids outside the fitted set (stale entries
+    from another run) are dropped; `scripts/vector_index.py index --prune` removes them.
     """
 
-    def __init__(self, model: str, base_url: str | None = None, batch_size: int = 64):
-        from openai import OpenAI
-        self.client = OpenAI(base_url=base_url or os.environ.get("OPENAI_BASE_URL"), timeout=300)
-        self.model = model
-        self.batch_size = batch_size
-        self.name = f"embed:{model}"
+    def __init__(self, strategy: str, query_instruction: bool = True, store=None):
+        from ..vectorstore import ChunkVectorStore
+        self.store = store or ChunkVectorStore(strategy)
+        self.instruction = config.QUERY_INSTRUCTION if query_instruction else None
+        self.name = f"chroma_{self.store.model}" + ("" if query_instruction else "_noinstr")
 
-    def _embed(self, texts: list[str]) -> np.ndarray:
-        vecs = []
-        for i in range(0, len(texts), self.batch_size):
-            resp = self.client.embeddings.create(model=self.model, input=texts[i:i + self.batch_size])
-            vecs += [d.embedding for d in resp.data]
-        arr = np.asarray(vecs, dtype=np.float32)
-        return arr / np.linalg.norm(arr, axis=1, keepdims=True)
-
-    def fit(self, texts: list[str]) -> None:
-        self.matrix = self._embed(texts)
+    def fit(self, chunks: list[Chunk]) -> None:
+        self.position = {c.chunk_id: i for i, c in enumerate(chunks)}
+        self.store.index(chunks)
 
     def search(self, queries: list[str], k: int) -> list[list[int]]:
-        scores = self._embed(queries) @ self.matrix.T
-        return [list(np.argsort(-row)[:k]) for row in scores]
+        hits = self.store.search_many(queries, k=k, instruction=self.instruction)
+        return [[self.position[h.chunk_id] for h in row if h.chunk_id in self.position] for row in hits]
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +183,7 @@ def evaluate(chunks: list[Chunk], questions: list[Question], retriever: Retrieve
     if not questions:
         raise ValueError("no questions reference documents in this corpus (is ref_id metadata attached?)")
 
-    retriever.fit([c.embed_text for c in chunks])
+    retriever.fit(chunks)
     max_k = max(ks)
     ranked = retriever.search([q.question for q in questions], max_k)
 

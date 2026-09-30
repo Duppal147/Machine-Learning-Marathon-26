@@ -246,9 +246,10 @@ uv run python scripts/eval_retrieval.py
 # a subset, with a different budget
 uv run python scripts/eval_retrieval.py --strategies hybrid fixed --max-tokens 250
 
-# dense retrieval through an OpenAI-compatible embeddings endpoint (e.g. the UW gateway)
-export OPENAI_API_KEY=$(op read op://Credentials/MLM26-RaggedyAmp_elinck/credential)
-uv run python scripts/eval_retrieval.py --retriever embed --embed-model <model-id> --base-url https://llm-gw01.doit.wisc.edu/v1
+# dense retrieval from the ChromaDB index (Qwen embeddings; needs OPENAI_API_KEY + UW VPN).
+# Indexes incrementally on first use, so later runs only embed the questions.
+uv run python scripts/eval_retrieval.py --retriever chroma --strategies hybrid hybrid_raw fixed
+uv run python scripts/eval_retrieval.py --retriever chroma --strategies hybrid --no-query-instruction
 ```
 
 `src/wattbot/eval/retrieval.py` rebuilds each preset's chunks from `documents/parsed_json`, retrieves the top chunks for each question in `WattBot2026/train_QA.csv`, and reports:
@@ -268,7 +269,7 @@ How it works:
 
 Per-question results (doc rank, passage rank, top-5 chunk IDs) go to `documents/eval/<strategy>__<retriever>.csv` for failure analysis.
 
-The embedding retriever has not yet been run against the gateway: the 1Password CLI needs an interactive unlock. Confirm the embedding model id there first.
+The Chroma retriever has not yet been run against the live gateway. The offline tests use a fake embedder. Hits for chunk ids that aren't in the evaluated chunk set (stale entries from another run) are dropped; `scripts/vector_index.py index --prune` removes them.
 
 ### Tests
 
@@ -300,10 +301,9 @@ Implemented as `CorpusMetadataEnricher` (§4.5). Still open: consider putting `r
 
 ### 7.2 ~~Retrieval evaluation harness~~ (done, with follow-ups)
 Implemented as `scripts/eval_retrieval.py` / `src/wattbot/eval/` (§5). Follow-ups:
-- Run it with the gateway's embedding model; TF-IDF only approximates what dense retrieval rewards.
+- Run `--retriever chroma` on the gateway and record the dense results here (with and without the query instruction). TF-IDF only approximates what dense retrieval rewards.
 - Parse more PDFs. Only 33 of 245 answerable questions are covered by the 5 parsed documents, so one question is worth about 3.5 points of recall.
 - Break results down by the `Table` / `Figure` / `Math` / `CrossPaper` flags (already loaded into `Question.flags`).
-- Cache embeddings by `(model, embed_text hash)` so repeated runs don't re-embed unchanged chunks.
 - Score on `test_Q.csv` answers once an end-to-end answer step exists (`WattBot2026/Score.py`).
 
 ### 7.3 Contextual retrieval enricher
