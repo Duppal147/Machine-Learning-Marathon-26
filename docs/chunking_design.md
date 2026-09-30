@@ -1,6 +1,6 @@
 # Chunking Pipeline: Design Notes
 
-Status: implemented (`rag/chunking/`), first iteration · Last updated: 2026-09-30
+Status: implemented (`src/wattbot/chunking/`, `src/wattbot/eval/`), first iteration · Last updated: 2026-09-30
 
 This document explains how parsed documents become retrievable chunks for the WattBot RAG system: how the pipeline works, why it is built this way, how to run and extend it, and what to improve next.
 
@@ -54,7 +54,7 @@ Each stage is a small `Protocol`, so any object with the right method can be dro
 
 ## 4. Components
 
-All code lives in `rag/chunking/`.
+All code lives in `src/wattbot/chunking/`. CLIs live in `scripts/`.
 
 ### 4.1 Data model (`models.py`)
 
@@ -150,16 +150,16 @@ All presets use `DropSections`, `MinTokens` and `CorpusMetadataEnricher`.
 
 ```bash
 # default: hybrid, all docs in documents/parsed_json -> documents/chunks/hybrid.jsonl
-uv run python chunk_docs.py
+uv run python scripts/chunk_docs.py
 
 # pick a preset and budget
-uv run python chunk_docs.py --strategy section --max-tokens 800
+uv run python scripts/chunk_docs.py --strategy section --max-tokens 800
 
 # only some documents (file stems in documents/parsed_json)
-uv run python chunk_docs.py 2109.04459 2404.07413
+uv run python scripts/chunk_docs.py 2109.04459 2404.07413
 
 # generate every preset for comparison
-for s in hybrid hybrid_raw section fixed; do uv run python chunk_docs.py --strategy $s; done
+for s in hybrid hybrid_raw section fixed; do uv run python scripts/chunk_docs.py --strategy $s; done
 ```
 
 The CLI prints each document's chunk count and median/max token length, then writes `documents/chunks/<strategy>.jsonl`.
@@ -167,14 +167,15 @@ The CLI prints each document's chunk count and median/max token length, then wri
 Full pipeline from scratch:
 
 ```bash
-uv run python parse_pdfs.py 2109.04459 2404.07413   # PDF -> documents/parsed_json + documents/figures
-uv run python chunk_docs.py                         # JSON -> documents/chunks/hybrid.jsonl
+uv run python scripts/parse_pdfs.py 2109.04459 2404.07413   # PDF -> documents/parsed_json + documents/figures
+uv run python scripts/chunk_docs.py                         # JSON -> documents/chunks/hybrid.jsonl
 ```
 
 ### From Python
 
 ```python
-from rag.chunking import ChunkStore, build_pipeline
+# run from the repo root with src on the path, e.g. PYTHONPATH=src uv run python
+from wattbot.chunking import ChunkStore, build_pipeline
 
 # build chunks in memory
 chunks = build_pipeline("hybrid", max_tokens=300).run(["documents/parsed_json/2109.04459.json"])
@@ -189,7 +190,7 @@ store.neighbors(c.chunk_id, k=1)   # surrounding context
 A custom pipeline without touching the registry:
 
 ```python
-from rag.chunking import ChunkingPipeline, HybridChunker, HeadingPrefixEnricher, DropSections, MinTokens
+from wattbot.chunking import ChunkingPipeline, HybridChunker, HeadingPrefixEnricher, DropSections, MinTokens
 
 pipe = ChunkingPipeline(
     "hybrid_250_notitle",
@@ -204,17 +205,17 @@ pipe = ChunkingPipeline(
 
 ```bash
 # all presets, offline TF-IDF retriever (a few seconds)
-uv run python eval_retrieval.py
+uv run python scripts/eval_retrieval.py
 
 # a subset, with a different budget
-uv run python eval_retrieval.py --strategies hybrid fixed --max-tokens 250
+uv run python scripts/eval_retrieval.py --strategies hybrid fixed --max-tokens 250
 
 # dense retrieval through an OpenAI-compatible embeddings endpoint (e.g. the UW gateway)
 export OPENAI_API_KEY=$(op read op://Credentials/MLM26-RaggedyAmp_elinck/credential)
-uv run python eval_retrieval.py --retriever embed --embed-model <model-id> --base-url https://llm-gw01.doit.wisc.edu/v1
+uv run python scripts/eval_retrieval.py --retriever embed --embed-model <model-id> --base-url https://llm-gw01.doit.wisc.edu/v1
 ```
 
-`rag/eval/retrieval.py` rebuilds each preset's chunks from `documents/parsed_json`, retrieves the top chunks for each question in `WattBot2026/train_QA.csv`, and reports:
+`src/wattbot/eval/retrieval.py` rebuilds each preset's chunks from `documents/parsed_json`, retrieves the top chunks for each question in `WattBot2026/train_QA.csv`, and reports:
 
 | Metric | Meaning |
 |---|---|
@@ -236,7 +237,7 @@ The embedding retriever has not yet been run against the gateway: the 1Password 
 ### Tests
 
 ```bash
-uv run pytest            # tests/test_chunking.py, tests/test_eval.py
+uv run --with pytest pytest tests/test_chunking.py tests/test_eval.py
 ```
 
 - **Chunking tests:** heading inference, the loader (furniture, picture text, tables, lists, references), the Hybrid chunker's rules, the fixed-window overlap, IDs and a store round trip, plus spot checks on `2109.04459`.
@@ -262,7 +263,7 @@ Roughly in priority order.
 Implemented as `CorpusMetadataEnricher` (§4.5). Still open: consider putting `ref_id` in the chunk ID.
 
 ### 7.2 ~~Retrieval evaluation harness~~ (done, with follow-ups)
-Implemented as `eval_retrieval.py` / `rag/eval/` (§5). Follow-ups:
+Implemented as `scripts/eval_retrieval.py` / `src/wattbot/eval/` (§5). Follow-ups:
 - Run it with the gateway's embedding model; TF-IDF only approximates what dense retrieval rewards.
 - Parse more PDFs. Only 33 of 245 answerable questions are covered by the 5 parsed documents, so one question is worth about 3.5 points of recall.
 - Break results down by the `Table` / `Figure` / `Math` / `CrossPaper` flags (already loaded into `Question.flags`).
@@ -283,7 +284,7 @@ An `LLMContextEnricher` would ask the chat model (the Qwen gateway, see `test_qw
 - Add the paragraph that references the table ("as shown in Table 3 …") to its metadata.
 
 ### 7.6 Figures
-Many WattBot answers come from charts. `parse_pdfs.py` already saves figure images to `documents/figures/<doc_id>/`. A vision model could write a figure description to emit as a `figure` chunk with its caption, page and image path.
+Many WattBot answers come from charts. `scripts/parse_pdfs.py` already saves figure images to `documents/figures/<doc_id>/`. A vision model could write a figure description to emit as a `figure` chunk with its caption, page and image path.
 
 ### 7.7 Retrieval-side structure
 - **Small-to-big / parent retrieval:** retrieve on small chunks, then send the parent section (or `neighbors`) to the LLM.

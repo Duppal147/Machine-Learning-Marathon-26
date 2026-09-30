@@ -1,9 +1,12 @@
+import sys
 from pathlib import Path
 
 import pytest
 
-from rag.chunking import Chunk, CorpusMetadataEnricher, Document
-from rag.eval import Question, TfidfRetriever, evaluate, evidence_coverage, extract_evidence, load_questions
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from wattbot.chunking import Chunk, CorpusMetadataEnricher, Document
+from wattbot.eval import Question, TfidfRetriever, evaluate, evidence_coverage, extract_evidence, load_questions
 
 
 def test_extract_evidence_prefers_long_quotes_and_splits_elisions():

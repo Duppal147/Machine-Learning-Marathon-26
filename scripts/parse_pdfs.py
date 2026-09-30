@@ -2,7 +2,7 @@
 """Convert sample PDFs with Docling: structured JSON + extracted figure images.
 
 Usage:
-    python parse_pdfs.py doc_id [doc_id ...]
+    python scripts/parse_pdfs.py doc_id [doc_id ...]
 
 doc_id is the PDF filename without ".pdf", e.g. "2501.16548" or
 "2023_Amazon_Sustainability_Report_0186f6c3".
@@ -36,7 +36,7 @@ def build_converter() -> DocumentConverter:
 def main():
     doc_ids = sys.argv[1:]
     if not doc_ids:
-        print("usage: python parse_pdfs.py doc_id [doc_id ...]", file=sys.stderr)
+        print("usage: python scripts/parse_pdfs.py doc_id [doc_id ...]", file=sys.stderr)
         sys.exit(1)
 
     JSON_OUT.mkdir(parents=True, exist_ok=True)

@@ -2,8 +2,8 @@
 """Download PDFs from a CSV of URLs, fetching arXiv metadata when available.
 
 Usage:
-    python download_papers.py papers.csv
-    python download_papers.py papers.csv --url-column source_url --out-dir pdfs
+    python scripts/download_papers.py papers.csv
+    python scripts/download_papers.py papers.csv --url-column source_url --out-dir pdfs
 """
 import argparse
 import csv

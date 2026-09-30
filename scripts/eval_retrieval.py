@@ -2,7 +2,7 @@
 """Compare chunking strategies by retrieval quality on WattBot train questions.
 
 Usage:
-    python eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|embed]
+    python scripts/eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|embed]
                              [--embed-model MODEL] [--base-url URL]
 
 Chunks are rebuilt from documents/parsed_json for each strategy. Only questions whose
@@ -13,10 +13,14 @@ For --retriever embed, set OPENAI_API_KEY (and --base-url or OPENAI_BASE_URL for
 """
 import argparse
 import csv
+import os
+import sys
 from pathlib import Path
 
-from rag.chunking import REGISTRY, build_pipeline
-from rag.eval import OpenAIEmbeddingRetriever, TfidfRetriever, evaluate, load_questions
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from wattbot.chunking import REGISTRY, build_pipeline
+from wattbot.eval import OpenAIEmbeddingRetriever, TfidfRetriever, evaluate, load_questions
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
