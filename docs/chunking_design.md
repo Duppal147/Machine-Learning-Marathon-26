@@ -201,6 +201,42 @@ pipe = ChunkingPipeline(
 )
 ```
 
+### Embedding and storing chunks (ChromaDB)
+
+`src/wattbot/vectorstore.py` embeds each chunk's `embed_text` with `wattbot.embeddings.embed_texts` (the Qwen gateway model), and stores the vector in a persistent ChromaDB collection in `documents/chroma/`. The chunk `text` and flat citation metadata are stored alongside it.
+
+**Collections.** There is one collection per strategy and model, e.g. `hybrid__qwen3-vl-embedding-8b`, so different chunkings or models never mix. Cosine space; Chroma's own embedding function and telemetry are both turned off.
+
+**Stored metadata.** Chroma only accepts scalar values, so lists are flattened:
+- `doc_id`, `ref_id`, `title`, `url`, `year`, `doc_type`, `kind`, `strategy`
+- `heading_path`, joined with `" > "`
+- `pages` (`"3,4"`) and `page_start` (int)
+- `embed_hash`
+
+**Incremental and resumable.** `embed_hash` is sha256(model + embed_text), and only new or changed chunks are embedded. Each batch of 64 is written as soon as it is embedded, so an interrupted run resumes where it stopped. Transient gateway errors (timeouts, dropped connections, 429/5xx) are retried 3 times with backoff.
+
+**Asymmetric queries.** Following the Qwen3 embedding convention, queries are embedded as `Instruct: <config.QUERY_INSTRUCTION>\nQuery: <question>` and documents are embedded as-is. Pass `instruction=None` (CLI `--no-query-instruction`) to compare.
+
+The chunks JSONL stays the source of truth. Search hits carry `chunk_id`, so `ChunkStore.get()` and `neighbors()` still work.
+
+```bash
+# needs OPENAI_API_KEY + UW VPN (see README)
+python scripts/vector_index.py index --strategy hybrid            # incremental; re-runs embed only changes
+python scripts/vector_index.py index --strategy hybrid --prune    # also delete chunks no longer in the JSONL
+python scripts/vector_index.py index --strategy hybrid --rebuild  # drop the collection and re-embed all
+python scripts/vector_index.py search "What was the total consumptive water use in 2023?" -k 5
+python scripts/vector_index.py search "..." --ref-id shehabi2024  # restrict to one document
+```
+
+```python
+from wattbot.vectorstore import ChunkVectorStore
+store = ChunkVectorStore("hybrid")
+hits = store.search("How much energy did training JetMoE use?", k=5, where={"doc_type": "paper"})
+hits[0].chunk_id, hits[0].score, hits[0].metadata["ref_id"], hits[0].metadata["pages"]
+```
+
+Rough size for the full corpus: ~15–20k chunks × 4096 float32 ≈ 250–330 MB, and ~1,000–1,300 gateway calls for a first full index.
+
 ### Evaluating retrieval (comparing strategies)
 
 ```bash
