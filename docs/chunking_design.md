@@ -287,7 +287,7 @@ How it works:
 
 Per-question results (doc rank, passage rank, top-5 chunk IDs) go to `documents/eval/<strategy>__<retriever>.csv` for failure analysis.
 
-The Chroma retriever has not yet been run against the live gateway. The offline tests use a fake embedder. Hits for chunk ids that aren't in the evaluated chunk set (stale entries from another run) are dropped; `scripts/vector_index.py index --prune` removes them.
+The Chroma retriever was first run against the live gateway on 2026-10-04 (results in §8). The offline tests use a fake embedder. Hits for chunk ids that aren't in the evaluated chunk set (stale entries from another run) are dropped; `scripts/vector_index.py index --prune` removes them.
 
 ### Tests
 
@@ -319,7 +319,7 @@ Implemented as `CorpusMetadataEnricher` (§4.5). Still open: consider putting `r
 
 ### 7.2 ~~Retrieval evaluation harness~~ (done, with follow-ups)
 Implemented as `scripts/eval_retrieval.py` / `src/wattbot/eval/` (§5). Follow-ups:
-- Run `--retriever chroma` on the gateway and record the dense results here (with and without the query instruction). TF-IDF only approximates what dense retrieval rewards.
+- ~~Run `--retriever chroma` on the gateway and record the dense results here (with and without the query instruction).~~ Done, see §8: dense alone trails TF-IDF, which moves hybrid search (§7.7) up the list.
 - Parse more PDFs. Only 33 of 245 answerable questions are covered by the 5 parsed documents, so one question is worth about 3.5 points of recall.
 - Break results down by the `Table` / `Figure` / `Math` / `CrossPaper` flags (already loaded into `Question.flags`).
 - Score on `test_Q.csv` answers once an end-to-end answer step exists (`WattBot2026/Score.py`).
@@ -387,6 +387,22 @@ Question notes:
 - **q441:** shows a Docling table-parsing error: cell text spilled into the neighbouring column, so no chunk contains the evidence intact.
 
 Use the per-question CSVs in `documents/eval/` to dig into these cases.
+
+### Dense vs TF-IDF (8 parsed documents, 2026-10-04)
+
+Snapshot `index-20261001-013712`, `hybrid` preset (763 chunks, all present in Chroma). 50 scored questions, 37 of them with locatable evidence.
+
+| Retriever | doc_recall@1 | doc_recall@5 | passage_recall@1 | passage_recall@5 | passage_recall@20 | passage_mrr | ctx_tokens@5 |
+|---|---|---|---|---|---|---|---|
+| TF-IDF | **0.900** | **0.980** | **0.622** | **0.811** | **0.946** | **0.703** | 1,107 |
+| Qwen dense (`qwen3-vl-embedding-8b`) | 0.840 | 0.920 | 0.405 | 0.757 | 0.811 | 0.539 | 1,267 |
+| Qwen dense, `--no-query-instruction` | 0.860 | 0.920 | 0.378 | 0.757 | 0.838 | 0.519 | 1,288 |
+
+Reading these results:
+- Dense alone trails TF-IDF on every metric. Per question (passage rank, 37 questions), TF-IDF ranks the evidence higher on 15, dense on 8, and they tie on 14, so the two are complementary rather than one dominating.
+- The query instruction makes no measurable difference at this sample size.
+- Dense misses are mostly **topical distractors**: passages on the right subject without the answer. For q025 (share of corporate PPAs in 2020) dense returns Amazon's renewable-energy procurement passages, and for q162 (GPT-3 queries per half liter of water) it returns another paper's description of a GPT-3 conversation workload. TF-IDF wins these on exact terms ("2020", "PPA", "half a liter").
+- This supports BM25 + dense fusion (§7.7) over dense alone. Re-run once more documents are parsed, since 37 passage questions is still a small sample.
 
 Known limitations:
 - The Amazon report is flat: its headings are unnumbered, so each chunk's `heading_path` has one level.
