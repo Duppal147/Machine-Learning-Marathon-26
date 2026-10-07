@@ -167,7 +167,8 @@ The CLI prints each document's chunk count and median/max token length, then wri
 Full pipeline from scratch:
 
 ```bash
-uv run python scripts/parse_pdfs.py 2109.04459 2404.07413   # PDF -> documents/parsed_json + documents/figures
+uv run python scripts/parse_pdfs.py --all                   # unparsed PDFs -> documents/parsed_json + documents/figures
+uv run python scripts/parse_pdfs.py 2109.04459              # or (re-)parse specific docs
 uv run python scripts/chunk_docs.py                         # JSON -> documents/chunks/hybrid.jsonl
 ```
 
@@ -320,7 +321,7 @@ Implemented as `CorpusMetadataEnricher` (§4.5). Still open: consider putting `r
 ### 7.2 ~~Retrieval evaluation harness~~ (done, with follow-ups)
 Implemented as `scripts/eval_retrieval.py` / `src/wattbot/eval/` (§5). Follow-ups:
 - ~~Run `--retriever chroma` on the gateway and record the dense results here (with and without the query instruction).~~ Done, see §8: dense alone trails TF-IDF, which moves hybrid search (§7.7) up the list.
-- Parse more PDFs. Only 33 of 245 answerable questions are covered by the 5 parsed documents, so one question is worth about 3.5 points of recall.
+- ~~Parse more PDFs.~~ Done (2026-10-07): all 122 documents are parsed, and 240 train questions are scored. Full-corpus dense vs TF-IDF results and the fusion proposal are in [hybrid_retrieval_design.md](hybrid_retrieval_design.md).
 - Break results down by the `Table` / `Figure` / `Math` / `CrossPaper` flags (already loaded into `Question.flags`).
 - Score on `test_Q.csv` answers once an end-to-end answer step exists (`WattBot2026/Score.py`).
 
@@ -342,7 +343,7 @@ Many WattBot answers come from charts. `scripts/parse_pdfs.py` already saves fig
 
 ### 7.7 Retrieval-side structure
 - **Small-to-big / parent retrieval:** retrieve on small chunks, then send the parent section (or `neighbors`) to the LLM.
-- **Hybrid search:** keep a BM25 index alongside the embeddings. Many questions hinge on exact numbers and model names ("JetMoE-8B", "3 Wh").
+- **Hybrid search:** keep a BM25 index alongside the embeddings (proposal: [hybrid_retrieval_design.md](hybrid_retrieval_design.md)). Many questions hinge on exact numbers and model names ("JetMoE-8B", "3 Wh").
 - **Metadata filtering:** by document type (paper/report), year and peer-review status, all available from `metadata.csv`.
 
 ### 7.8 Chunker refinements

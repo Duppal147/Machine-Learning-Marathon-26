@@ -18,7 +18,7 @@ python scripts/check_text_embeddings.py       # live check: dimension, stability
 ```bash
 python scripts/download_papers.py WattBot2026/metadata.csv --out-dir documents/pdfs \
     --metadata-out WattBot2026/metadata_downloaded.csv  # file -> ref_id mapping used by chunking
-python scripts/parse_pdfs.py <doc_id> [...]             # PDF -> documents/parsed_json (Docling)
+python scripts/parse_pdfs.py --all                      # unparsed PDFs -> documents/parsed_json (Docling; ~10 min)
 python scripts/chunk_docs.py --strategy hybrid          # -> documents/chunks/hybrid.jsonl
 python scripts/vector_index.py index --strategy hybrid  # embed + store in documents/chroma (incremental)
 python scripts/vector_index.py search "How much water did US data centers consume in 2023?"
