@@ -14,7 +14,7 @@ download_papers.py ──► parse_pdfs.py ──► chunk_docs.py ──► vec
 | Step | Script | Reads | Writes | Needs VPN + key? | Time (full corpus) |
 |---|---|---|---|---|---|
 | 1 | `download_papers.py` | `WattBot2026/metadata.csv` | `documents/pdfs/`, `WattBot2026/metadata_downloaded.csv` | no | minutes |
-| 2 | `parse_pdfs.py` | `documents/pdfs/` | `documents/parsed_json/`, `documents/figures/` | no | **hours** |
+| 2 | `parse_pdfs.py` | `documents/pdfs/` | `documents/parsed_json/`, `documents/figures/` | no | ~10 min (122 PDFs) |
 | 3 | `chunk_docs.py` | `documents/parsed_json/` | `documents/chunks/<strategy>.jsonl` | no | seconds |
 | 4 | `check_text_embeddings.py` | nothing | nothing (live gateway check) | **yes** | ~1–2 min |
 | 5 | `vector_index.py index` | `documents/chunks/` | `documents/chroma/` | **yes** | ~1,000+ API calls |
@@ -61,18 +61,14 @@ uv run python scripts/download_papers.py WattBot2026/metadata.csv \
 - Files that already exist are skipped, so re-running only fetches what's missing.
 
 ## Step 2: Parse PDFs with Docling
-The script takes document IDs, which are the PDF file names without `.pdf`:
 ```bash
-uv run python scripts/parse_pdfs.py 2109.04459 2404.07413
+uv run python scripts/parse_pdfs.py --all              # every PDF without parsed JSON yet
+uv run python scripts/parse_pdfs.py 2109.04459         # (re-)parse specific docs (PDF file names without .pdf)
+uv run python scripts/parse_pdfs.py --all --force      # re-parse everything
 ```
-Parse **only the PDFs that haven't been parsed yet**. The script re-parses anything you pass it:
-```bash
-todo=$(for f in documents/pdfs/*.pdf; do id=$(basename "$f" .pdf); \
-       [ -f "documents/parsed_json/$id.json" ] || echo "$id"; done)
-uv run python scripts/parse_pdfs.py $todo
-```
-- This is the slow step: accurate table recognition takes minutes per long report.
-- Run it in batches or in the background, e.g. `nohup uv run python scripts/parse_pdfs.py $todo > parse.log 2>&1 &`.
+- The full corpus (122 PDFs, ~2,360 pages) takes about 10 minutes.
+- A document that fails is logged as `FAIL <id>` and skipped. The run ends with the list of failed IDs and a non-zero exit, so re-run or parse those individually.
+- JSON is written atomically, so an interrupted run never leaves a half-written file. Re-running `--all` picks up where it stopped.
 - It writes `documents/parsed_json/<id>.json` plus figure PNGs in `documents/figures/<id>/`.
 
 ## Step 3: Chunk the parsed documents
