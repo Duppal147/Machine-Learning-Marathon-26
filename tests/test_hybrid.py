@@ -7,7 +7,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wattbot.chunking import Chunk
-from wattbot.eval import BM25Retriever, CachedRetriever, ChromaRetriever, FusionRetriever, Question, evaluate
+from wattbot.eval import (BM25Retriever, CachedRetriever, ChromaRetriever, CrossEncoderReranker, FusionRetriever,
+                          Question, evaluate)
 from wattbot.hybrid import Bm25Index, rrf_fuse, tokenize
 
 
@@ -162,3 +163,24 @@ def test_fusion_retriever_name_records_weights_and_k():
     assert FusionRetriever([BM25Retriever(), BM25Retriever()], weights=[1.0, 0.3]).name == "rrf_bm25+bm25x0.3"
     assert FusionRetriever([BM25Retriever()], k_rrf=20).name == "rrf_bm25_k20"
 
+
+class _LengthScorer:
+    """Fake cross-encoder: longer chunk text scores higher."""
+    def __init__(self):
+        self.pairs = 0
+
+    def predict(self, pairs, batch_size=32, show_progress_bar=False):
+        self.pairs += len(pairs)
+        return [float(len(text)) for _, text in pairs]
+
+
+def test_cross_encoder_reranker_reorders_only_the_candidates(tmp_path):
+    chunks = [_chunk(i, "a2024", "x" * n) for i, n in enumerate([1, 5, 3, 9, 7])]
+    reranker = CrossEncoderReranker(_CountingRetriever([0, 1, 2, 3, 4]), "fake/model", candidates=3,
+                                    cache_dir=tmp_path)
+    reranker._model = scorer = _LengthScorer()
+    reranker.fit(chunks)
+    assert reranker.search(["q"], k=5) == [[1, 2, 0, 3, 4]]   # top 3 reordered by score, tail kept
+    assert reranker.search(["q"], k=2) == [[1, 2]]
+    assert scorer.pairs == 3                                   # second call served from the score cache
+    assert reranker.name == "rerank3_model__counting"

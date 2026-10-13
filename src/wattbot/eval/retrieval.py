@@ -207,6 +207,119 @@ class FusionRetriever:
                 for rankings in zip(*per_retriever)]
 
 
+class SentenceTransformerRetriever:
+    """Local dense retrieval with a sentence-transformers model (no gateway needed).
+
+    Defaults to BAAI/bge-base-en-v1.5, a BERT-based bi-encoder, as a text-only point of
+    comparison for the Qwen gateway embeddings. Chunk vectors are cached on disk keyed by
+    a hash of (model, embed_text), so re-runs only encode new or changed chunks.
+
+    sentence-transformers is not a project dependency; run with
+    `uv run --with sentence-transformers ...`.
+    """
+
+    BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", query_prefix: str | None = BGE_QUERY_PREFIX,
+                 cache_dir: Path = Path("documents/eval/st_cache"), batch_size: int = 32):
+        self.model_name = model_name
+        self.query_prefix = query_prefix or ""
+        self.cache_dir = Path(cache_dir)
+        self.batch_size = batch_size
+        self.name = "st_" + model_name.split("/")[-1] + ("" if query_prefix else "_noprefix")
+        self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+    def _encode(self, texts: list[str]) -> np.ndarray:
+        return np.asarray(self.model.encode(texts, batch_size=self.batch_size, normalize_embeddings=True,
+                                            show_progress_bar=len(texts) > 500), dtype=np.float32)
+
+    def fit(self, chunks: list[Chunk]) -> None:
+        import hashlib
+        stem = self.cache_dir / self.model_name.replace("/", "__")
+        keys = [hashlib.sha256(f"{self.model_name}\n{c.embed_text}".encode()).hexdigest() for c in chunks]
+        cached: dict[str, np.ndarray] = {}
+        if stem.with_suffix(".npy").exists():
+            vecs = np.load(stem.with_suffix(".npy"))
+            cached = dict(zip(json.loads(stem.with_suffix(".json").read_text()), vecs))
+        todo = [i for i, key in enumerate(keys) if key not in cached]
+        if todo:
+            for i, vec in zip(todo, self._encode([chunks[i].embed_text for i in todo])):
+                cached[keys[i]] = vec
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            np.save(stem.with_suffix(".npy"), np.stack(list(cached.values())))
+            stem.with_suffix(".json").write_text(json.dumps(list(cached)))
+        self.matrix = np.stack([cached[key] for key in keys])
+
+    def search(self, queries: list[str], k: int) -> list[list[int]]:
+        scores = self._encode([self.query_prefix + q for q in queries]) @ self.matrix.T
+        return [list(np.argsort(-row, kind="stable")[:k]) for row in scores]
+
+
+class CrossEncoderReranker:
+    """Rerank another retriever's top `candidates` chunks with a cross-encoder.
+
+    Retrievers score the question and each chunk separately (shared words or vector
+    similarity); a cross-encoder reads the pair together and judges whether the chunk
+    answers the question. It is too slow to run over the whole corpus, so it only
+    reorders the base retriever's top candidates; hits below that are kept in base order.
+    Defaults to BAAI/bge-reranker-large, the best of the rerankers compared in
+    docs/hybrid_retrieval_design.md §8 (OpenScholar also builds on it). Pair scores are
+    cached on disk, so re-runs are fast.
+
+    sentence-transformers is not a project dependency; run with
+    `uv run --with sentence-transformers ...`.
+    """
+
+    def __init__(self, base: Retriever, model_name: str = "BAAI/bge-reranker-large", candidates: int = 20,
+                 cache_dir: Path = Path("documents/eval/rerank_cache"), batch_size: int = 32):
+        self.base = base
+        self.model_name = model_name
+        self.candidates = candidates
+        self.batch_size = batch_size
+        self.cache_path = Path(cache_dir) / (model_name.replace("/", "__") + ".json")
+        self.cache: dict[str, float] = json.loads(self.cache_path.read_text()) if self.cache_path.exists() else {}
+        self.name = f"rerank{candidates}_{model_name.split('/')[-1]}__{base.name}"
+        self._model = None
+
+    def fit(self, chunks: list[Chunk]) -> None:
+        self.chunks = chunks
+        self.base.fit(chunks)
+
+    def _scores(self, pairs: list[tuple[str, int]]) -> list[float]:
+        keys = [f"{q}\x1f{self.chunks[i].chunk_id}" for q, i in pairs]
+        todo = [j for j, key in enumerate(keys) if key not in self.cache]
+        if todo:
+            if self._model is None:
+                from sentence_transformers import CrossEncoder
+                self._model = CrossEncoder(self.model_name, max_length=512)
+            texts = [(pairs[j][0], self.chunks[pairs[j][1]].embed_text) for j in todo]
+            for j, score in zip(todo, self._model.predict(texts, batch_size=self.batch_size,
+                                                          show_progress_bar=len(texts) > 500)):
+                self.cache[keys[j]] = float(score)
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(json.dumps(self.cache))
+        return [self.cache[key] for key in keys]
+
+    def search(self, queries: list[str], k: int) -> list[list[int]]:
+        base = self.base.search(queries, max(k, self.candidates))
+        pairs = [(q, i) for q, ranked in zip(queries, base) for i in ranked[:self.candidates]]
+        scores = iter(self._scores(pairs))
+        results = []
+        for ranked in base:
+            head = ranked[:self.candidates]
+            head_scores = [next(scores) for _ in head]
+            reordered = [i for _, i in sorted(zip(head_scores, head), key=lambda t: -t[0])]
+            results.append((reordered + ranked[self.candidates:])[:k])
+        return results
+
+
 class CachedRetriever:
     """Wrap a retriever and cache its rankings on disk, keyed by query text.
 
