@@ -18,7 +18,7 @@ download_papers.py ──► parse_pdfs.py ──► chunk_docs.py ──► vec
 | 3 | `chunk_docs.py` | `documents/parsed_json/` | `documents/chunks/<strategy>.jsonl` | no | seconds |
 | 4 | `check_text_embeddings.py` | nothing | nothing (live gateway check) | **yes** | ~1–2 min |
 | 5 | `vector_index.py index` | `documents/chunks/` | `documents/chroma/` | **yes** | ~1,000+ API calls |
-| 6 | `vector_index.py search` / `eval_retrieval.py` | chunks, Chroma, `WattBot2026/train_QA.csv` | `documents/eval/` | chroma: **yes**; tfidf: no | minutes |
+| 6 | `vector_index.py search` / `eval_retrieval.py` | chunks, Chroma, `WattBot2026/train_QA.csv` | `documents/eval/` | chroma/hybrid: **yes**; tfidf/bm25: no | minutes |
 | 7 | `publish_index.py` | all of the above | a GitHub Release | no (needs `gh`) | seconds |
 
 Everything under `documents/` and `WattBot2026/` is gitignored and stays on your machine. Step 7 is how the team shares it.
@@ -108,6 +108,9 @@ Measure retrieval quality on the training questions:
 uv run python scripts/eval_retrieval.py                                        # TF-IDF, all strategies, offline
 uv run python scripts/eval_retrieval.py --retriever chroma --strategies hybrid hybrid_raw fixed
 uv run python scripts/eval_retrieval.py --retriever chroma --strategies hybrid --no-query-instruction
+uv run python scripts/eval_retrieval.py --retriever bm25 --strategies hybrid   # BM25, offline
+uv run python scripts/eval_retrieval.py --retriever hybrid --strategies hybrid # BM25 + dense, RRF
+uv run python scripts/sweep_rrf.py --dense-weights 0.1 0.5 1 --rrf-k 20 60     # compare fusion settings
 ```
 - **What's scored:** only questions whose source documents have been parsed. The header shows how many.
 - **Per-question results:** written to `documents/eval/<strategy>__<retriever>.csv`.
