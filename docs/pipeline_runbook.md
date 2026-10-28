@@ -111,6 +111,7 @@ uv run python scripts/eval_retrieval.py --retriever chroma --strategies hybrid -
 uv run python scripts/eval_retrieval.py --retriever bm25 --strategies hybrid   # BM25, offline
 uv run python scripts/eval_retrieval.py --retriever hybrid --strategies hybrid # BM25 + dense, RRF
 uv run python scripts/sweep_rrf.py --dense-weights 0.1 0.5 1 --rrf-k 20 60     # compare fusion settings
+uv run --with sentence-transformers python scripts/eval_rerank.py --with-bm25  # rerank top 20 (local model)
 ```
 - **What's scored:** only questions whose source documents have been parsed. The header shows how many.
 - **Per-question results:** written to `documents/eval/<strategy>__<retriever>.csv`.

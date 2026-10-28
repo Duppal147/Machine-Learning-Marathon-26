@@ -1,6 +1,6 @@
 # Hybrid Retrieval: Design Notes
 
-Status: evaluation path implemented (results in §7) · Last updated: 2026-10-12
+Status: evaluation path implemented; fusion results in §7, reranking in §8 · Last updated: 2026-10-12
 
 Now that all 122 corpus documents are parsed and indexed, dense retrieval (Qwen embeddings) scores **below** the offline TF-IDF baseline. The two fail on different questions, though. This document records those results and proposes combining lexical and dense retrieval with reciprocal rank fusion (RRF), which is the "Hybrid search" item in `chunking_design.md` §7.7. For the chunking pipeline and the evaluation harness, see [chunking_design.md](chunking_design.md).
 
@@ -188,6 +188,37 @@ Against the adoption criteria in §4:
 Conclusions:
 - **BM25 is a clear win over TF-IDF**, alone (about 16 more questions at passage@5) and as the lexical partner in fusion. It should replace TF-IDF as the lexical retriever.
 - **Fusion alone doesn't beat BM25 for the top 5.** Equal-weight RRF ranks dense's on-topic but answerless chunks above BM25's correct first hits (30 questions lose their rank-1 answer), while rescuing 11 questions BM25 misses entirely.
-- **Its value is recall.** Equal-weight RRF puts the answer in the top 20 for 96.7% of questions, versus 90.7% for BM25. That makes it the candidate pool for the cross-encoder reranker suggested in §5, which follows in a separate PR. In preliminary runs, reranking that top 20 with `bge-reranker-large` reaches passage@5 0.934 and MRR 0.813.
+- **Its value is recall.** Equal-weight RRF puts the answer in the top 20 for 96.7% of questions, versus 90.7% for BM25. That makes it the candidate pool for the cross-encoder reranker suggested in §5 (results in §8).
 - Following §4's small-sample caution, the weight sweep is reported for understanding, not as a tuned default. Dense-only results vary by about one question between runs (0.632–0.643).
+
+## 8. Reranking the fused top 20 (2026-10-12)
+
+`CrossEncoderReranker` (in `src/wattbot/eval/retrieval.py`) takes any retriever's top `candidates` chunks and reorders them by a cross-encoder score. The cross-encoder reads the question and each chunk's `embed_text` together. Chunks below the candidate cutoff keep their base order. The reranker runs locally with sentence-transformers, so it needs no gateway call. Pair scores are cached in `documents/eval/rerank_cache/`. Run it with `scripts/eval_rerank.py`.
+
+Same 182 passage questions. The base is equal-weight RRF(BM25, dense) with 20 candidates, unless noted.
+
+| Setup | passage@1 | passage@5 | passage@20 | MRR | doc@1 | ctx_tokens@5 |
+|---|---|---|---|---|---|---|
+| No reranking (k_rrf=60) | 0.516 | 0.819 | 0.967 | 0.648 | 0.800 | 1,355 |
+| + `OpenScholar/OpenScholar_Reranker` (k_rrf=20) | 0.571 | 0.868 | 0.967 | 0.692 | 0.800 | 1,463 |
+| + `BAAI/bge-reranker-base` (k_rrf=20 or 60) | 0.692 | 0.923 | 0.967 | 0.795 | 0.875 | ~1,465 |
+| **+ `BAAI/bge-reranker-large` (k_rrf=60)** | **0.720** | **0.934** | 0.967 | **0.814** | **0.908** | 1,432 |
+| + `bge-reranker-large`, 30 / 50 candidates (k_rrf=20) | 0.720 / 0.725 | 0.929 / 0.929 | 0.967 / 0.956 | 0.811 / 0.812 | 0.904 / 0.900 | ~1,450 |
+| BM25 only + `bge-reranker-large` | 0.703 | 0.901 | 0.907 | 0.788 | 0.896 | 1,455 |
+
+Against the adoption criteria in §4, the best setup (standard RRF, top 20, `bge-reranker-large`):
+1. **Met.** passage@5 is 0.934 vs BM25's 0.830 (about 19 questions), and MRR is 0.814 vs 0.696.
+2. **Met.** Math 10/11 and CrossPaper 4/7, the same as dense. All 13 Table questions are in the top 5.
+3. **Not met.** `ctx_tokens@5` is 1,432 vs dense's 1,266. That is close to BM25's own 1,405, and it probably comes from the oversized tables in §6.
+
+Findings:
+- **Reranking is the largest single gain so far.** It works because fusion already puts the answer in the top 20 for 96.7% of questions. Reranking BM25's top 20 alone reaches only 0.901.
+- **`k_rrf` stops mattering** once the reranker reorders the candidates: k=20 and k=60 give the same results. So the standard `k_rrf = 60` with equal weights is used. Nothing in this setup was tuned on the train questions.
+- **More candidates don't help.** 30 or 50 candidates add distractors and can push the answer out of the top 20.
+- **The OpenScholar reranker is worse** despite being tuned on scientific papers. It was trained to judge whether a passage helps a literature review on the topic, which favours the same on-topic distractors dense retrieval returns. WattBot needs whether a passage contains a specific fact.
+- **Qwen remains the better dense partner.** A local BERT bi-encoder (`BAAI/bge-base-en-v1.5`, `SentenceTransformerRetriever`) scores lower than Qwen alone (passage@5 0.577 vs 0.632) and in fusion. Dense trailing BM25 therefore isn't specific to Qwen.
+
+**Recommended search for answer generation:** RRF(BM25, Qwen dense) with equal weights and `k_rrf = 60`, then rerank the top 20 with `bge-reranker-large` and pass the top 5 on.
+
+**Dependency:** the reranker and the local dense model need `sentence-transformers`. That isn't a project dependency yet, so for now run with `uv run --with sentence-transformers`. `OpenScholar_Reranker` also needs `--with sentencepiece`. The model downloads on first use (`bge-reranker-large` is about 2.1 GB).
 

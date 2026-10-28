@@ -3,7 +3,11 @@
 
 Usage:
     python scripts/sweep_rrf.py [--strategy hybrid] [--dense-weights 0.2 0.3 0.5 1]
-                                [--rrf-k 60] [--no-query-instruction]
+                                [--rrf-k 60] [--no-query-instruction] [--dense-model qwen]
+
+--dense-model qwen (default) uses the Qwen gateway embeddings in Chroma. Any other value is
+loaded locally as a sentence-transformers model, e.g. BAAI/bge-base-en-v1.5 (needs
+`uv run --with sentence-transformers`, no gateway).
 
 Dense rankings are cached in documents/eval/cache/, so only the first run needs the
 gateway (OPENAI_API_KEY + UW VPN); later runs with any weights or k are offline.
@@ -20,7 +24,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wattbot.chunking import REGISTRY, build_pipeline
 from wattbot.embeddings import EmbeddingConfigurationError
-from wattbot.eval import BM25Retriever, CachedRetriever, ChromaRetriever, FusionRetriever, evaluate, load_questions
+from wattbot.eval import (BM25Retriever, CachedRetriever, ChromaRetriever, FusionRetriever,
+                          SentenceTransformerRetriever, evaluate, load_questions)
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
@@ -36,12 +41,18 @@ def main():
     parser.add_argument("--rrf-k", nargs="+", type=int, default=[60])
     parser.add_argument("--depth", type=int, default=50, help="chunks each retriever contributes to the fusion")
     parser.add_argument("--no-query-instruction", action="store_true",
-                        help="embed raw questions without the Qwen query instruction")
+                        help="embed raw questions (Qwen: no instruction; local models: no query prefix)")
+    parser.add_argument("--dense-model", default="qwen",
+                        help="qwen (gateway, Chroma) or a sentence-transformers model id")
     args = parser.parse_args()
 
     questions = load_questions()
     chunks = build_pipeline(args.strategy).run(sorted(PARSED_DIR.glob("*.json")))
-    dense_inner = ChromaRetriever(args.strategy, query_instruction=not args.no_query_instruction)
+    if args.dense_model == "qwen":
+        dense_inner = ChromaRetriever(args.strategy, query_instruction=not args.no_query_instruction)
+    else:
+        prefix = None if args.no_query_instruction else SentenceTransformerRetriever.BGE_QUERY_PREFIX
+        dense_inner = SentenceTransformerRetriever(args.dense_model, query_prefix=prefix)
     dense = CachedRetriever(dense_inner, EVAL_OUT / "cache" / f"{args.strategy}__{dense_inner.name}.json")
 
     configs = [("bm25 only", BM25Retriever()), (f"dense only ({dense_inner.name})", dense)]
