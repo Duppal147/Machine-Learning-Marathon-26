@@ -12,6 +12,10 @@ REQUEST_TIMEOUT = 300  # first call after a cold start can take ~90s
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "qwen3-vl-embedding-8b")
 EMBEDDING_DIM = 4096
 
+# Vision-language chat model that reads chart images (scripts/describe_figures.py). Empty means
+# "pick the gateway's only Qwen-VL chat model"; run scripts/check_vision_model.py to see what is served.
+VISION_MODEL = os.environ.get("VISION_MODEL", "")
+
 # Vector store (under the gitignored documents/ folder)
 CHROMA_DIR = os.environ.get("CHROMA_DIR", "documents/chroma")
 

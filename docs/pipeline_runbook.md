@@ -71,12 +71,19 @@ uv run python scripts/parse_pdfs.py --all --force      # re-parse everything
 - JSON is written atomically, so an interrupted run never leaves a half-written file. Re-running `--all` picks up where it stopped.
 - It writes `documents/parsed_json/<id>.json` plus figure PNGs in `documents/figures/<id>/`.
 
+## Step 2b (optional): Read the charts with the vision model
+```bash
+uv run python scripts/describe_figures.py --limit 5     # smoke test, then drop --limit
+```
+- Needs VPN + key. Writes `documents/figure_text/`, which the `hybrid_fig` strategy in step 3 reads. Resumable and cached per image.
+- Needs the figure PNGs from step 2 (snapshots don't include them). Full walkthrough, evaluation and limits: [figure_retrieval_design.md](figure_retrieval_design.md).
+
 ## Step 3: Chunk the parsed documents
 ```bash
 uv run python scripts/chunk_docs.py --strategy hybrid          # all parsed docs -> documents/chunks/hybrid.jsonl
 uv run python scripts/chunk_docs.py --strategy hybrid 2109.04459   # only some docs
 ```
-- **Strategies:** `hybrid` (default, recommended), `hybrid_raw`, `section`, `fixed`. `--max-tokens N` changes the chunk budget.
+- **Strategies:** `hybrid` (default, recommended), `hybrid_raw`, `section`, `fixed`, plus the chart strategies `hybrid_figlabels` and `hybrid_fig` (step 2b). `--max-tokens N` changes the chunk budget.
 - **Output:** per-document chunk counts and sizes are printed. Chunk IDs look like `2109.04459::hybrid::0005`.
 - **Re-chunking:** this is cheap, so re-run it whenever parsed documents are added or the chunking code changes.
 
