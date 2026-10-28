@@ -1,6 +1,6 @@
 # Hybrid Retrieval: Design Notes
 
-Status: proposed · Last updated: 2026-10-07
+Status: evaluation path implemented (results in §7) · Last updated: 2026-10-12
 
 Now that all 122 corpus documents are parsed and indexed, dense retrieval (Qwen embeddings) scores **below** the offline TF-IDF baseline. The two fail on different questions, though. This document records those results and proposes combining lexical and dense retrieval with reciprocal rank fusion (RRF), which is the "Hybrid search" item in `chunking_design.md` §7.7. For the chunking pipeline and the evaluation harness, see [chunking_design.md](chunking_design.md).
 
@@ -159,3 +159,35 @@ Record the results in `chunking_design.md` §8 (or a results section here) and t
 - **Oversized table chunks:** 141 chunks are over the 400-token budget, the largest about 2,700 tokens (a mis-parsed GPU energy table in `2002.07795`). The hybrid chunker never splits tables. Long tables may skew BM25 length normalization and inflate `ctx_tokens@5`. Splitting tables by row groups with a repeated header is a separate change to consider if they show up among fusion's misses.
 - **Gold labels that may be too strict:** some dense "misses" may be correct answers from a different document than the one the question cites (q105 is one to check). Doc and passage recall only credit the cited `ref_id`.
 - **The 24 questions neither retriever finds** in the top 5 are worth inspecting separately. They may be parsing or table problems rather than retrieval problems.
+
+## 7. Results (2026-10-12)
+
+Implemented as proposed in §3.3, in `src/wattbot/hybrid.py` (BM25 scoring, weighted RRF) and `src/wattbot/eval/retrieval.py` (`BM25Retriever`, `FusionRetriever`, `CachedRetriever`). Differences from the proposal:
+- BM25 uses `k1 = 1.5`, and it leaves out chunks that share no term with the query. Their order would be arbitrary, so in a fusion they would add rank credit backed by no evidence.
+- `FusionRetriever` takes per-retriever `weights`.
+- `scripts/sweep_rrf.py` caches the dense rankings in `documents/eval/cache/`. After one gateway run, every fusion setting can be compared offline.
+
+Same 6,033 `hybrid` chunks and 182 passage questions as §1. Fusion uses `depth = 50` unless noted.
+
+| Retriever | passage@5 | passage@20 | MRR | doc@1 | ctx_tokens@5 | Math p@5 | CrossPaper p@5 |
+|---|---|---|---|---|---|---|---|
+| TF-IDF | 0.742 | 0.874 | 0.658 | 0.775 | 1,079 | 7/11 | 2/7 |
+| **BM25** | **0.830** | 0.907 | **0.696** | 0.812 | 1,405 | 8/11 | 3/7 |
+| Dense (Qwen) | 0.632 | 0.841 | 0.467 | 0.650 | 1,266 | 10/11 | 4/7 |
+| RRF(TF-IDF, dense), k=60 | 0.753 | — | 0.622 | 0.796 | 1,190 | 9/11 | 4/7 |
+| RRF(BM25, dense), k=60 | 0.819 | **0.967** | 0.648 | 0.800 | 1,355 | 9/11 | 5/7 |
+| RRF(BM25, dense), k=10 / 30 | 0.830 / 0.819 | — | 0.673 / 0.653 | 0.817 / 0.804 | 1,352 / 1,354 | 9/11 | 5/7 |
+| RRF(BM25, dense), k=60, depth 20 | 0.835 | — | 0.649 | 0.800 | 1,351 | 9/11 | 4/7 |
+| RRF(BM25, dense ×0.1), k=60 | **0.846** | 0.923 | 0.682 | **0.821** | 1,395 | 8/11 | 3/7 |
+
+Against the adoption criteria in §4:
+1. **Not met.** No fusion setting beats BM25's MRR. Dense weight 0.1 gains about three questions at passage@5, but loses MRR.
+2. **Met at equal weights** (Math 9/11, CrossPaper 5/7, vs dense's 10/11 and 4/7). It fails at dense weight 0.1.
+3. **Not met by any BM25 setting.** BM25 itself already returns longer chunks (1,405 tokens), likely the oversized tables from §6.
+
+Conclusions:
+- **BM25 is a clear win over TF-IDF**, alone (about 16 more questions at passage@5) and as the lexical partner in fusion. It should replace TF-IDF as the lexical retriever.
+- **Fusion alone doesn't beat BM25 for the top 5.** Equal-weight RRF ranks dense's on-topic but answerless chunks above BM25's correct first hits (30 questions lose their rank-1 answer), while rescuing 11 questions BM25 misses entirely.
+- **Its value is recall.** Equal-weight RRF puts the answer in the top 20 for 96.7% of questions, versus 90.7% for BM25. That makes it the candidate pool for the cross-encoder reranker suggested in §5, which follows in a separate PR. In preliminary runs, reranking that top 20 with `bge-reranker-large` reaches passage@5 0.934 and MRR 0.813.
+- Following §4's small-sample caution, the weight sweep is reported for understanding, not as a tuned default. Dense-only results vary by about one question between runs (0.632–0.643).
+

@@ -14,6 +14,7 @@ numbers are comparable across strategies but grow in coverage as more PDFs are p
 """
 import ast
 import csv
+import json
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -159,6 +160,86 @@ class ChromaRetriever:
     def search(self, queries: list[str], k: int) -> list[list[int]]:
         hits = self.store.search_many(queries, k=k, instruction=self.instruction)
         return [[self.position[h.chunk_id] for h in row if h.chunk_id in self.position] for row in hits]
+
+
+class BM25Retriever:
+    """Okapi BM25 lexical retrieval (offline, no API needed)."""
+
+    name = "bm25"
+
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        from ..hybrid import Bm25Index
+        self.index = Bm25Index(k1=k1, b=b)
+
+    def fit(self, chunks: list[Chunk]) -> None:
+        self.index.fit([c.embed_text for c in chunks])
+
+    def search(self, queries: list[str], k: int) -> list[list[int]]:
+        return self.index.search(queries, k)
+
+
+class FusionRetriever:
+    """Hybrid retrieval: fuse the rankings of several retrievers with Reciprocal Rank Fusion.
+
+    Each retriever contributes its top `depth` chunks, which should be deeper than the
+    final k so a chunk ranked moderately by both can still surface. `weights` (one per
+    retriever, default all 1) let the stronger retriever decide the top ranks.
+    """
+
+    def __init__(self, retrievers: list[Retriever], k_rrf: int = 60, depth: int = 50,
+                 weights: list[float] | None = None):
+        self.retrievers = retrievers
+        self.k_rrf = k_rrf
+        self.depth = depth
+        self.weights = weights
+        parts = [r.name if w in (None, 1) else f"{r.name}x{w:g}"
+                 for r, w in zip(retrievers, weights or [None] * len(retrievers))]
+        self.name = "rrf_" + "+".join(parts) + ("" if k_rrf == 60 else f"_k{k_rrf}")
+
+    def fit(self, chunks: list[Chunk]) -> None:
+        for retriever in self.retrievers:
+            retriever.fit(chunks)
+
+    def search(self, queries: list[str], k: int) -> list[list[int]]:
+        from ..hybrid import rrf_fuse
+        per_retriever = [r.search(queries, max(k, self.depth)) for r in self.retrievers]
+        return [rrf_fuse(rankings, self.k_rrf, limit=k, weights=self.weights)
+                for rankings in zip(*per_retriever)]
+
+
+class CachedRetriever:
+    """Wrap a retriever and cache its rankings on disk, keyed by query text.
+
+    Dense retrieval needs the gateway for every query, so sweeping fusion settings would
+    re-embed all questions on every run. The cache stores ranked chunk ids, so after one
+    gateway run every later run is offline. Cached ids missing from the current chunk set
+    are dropped, as ChromaRetriever does with stale hits.
+    """
+
+    def __init__(self, retriever: Retriever, path: Path):
+        self.retriever = retriever
+        self.path = Path(path)
+        self.name = retriever.name
+        # {query: {"k": depth requested, "ids": ranked chunk ids}}; "k" is kept separately
+        # because a retriever may return fewer than k hits, which is still a complete answer
+        self.cache: dict[str, dict] = json.loads(self.path.read_text()) if self.path.exists() else {}
+
+    def fit(self, chunks: list[Chunk]) -> None:
+        self.chunks = chunks
+        self.position = {c.chunk_id: i for i, c in enumerate(chunks)}
+        self._fitted_inner = False
+
+    def search(self, queries: list[str], k: int) -> list[list[int]]:
+        missing = [q for q in dict.fromkeys(queries) if self.cache.get(q, {}).get("k", 0) < k]
+        if missing:
+            if not self._fitted_inner:
+                self.retriever.fit(self.chunks)
+                self._fitted_inner = True
+            for q, idxs in zip(missing, self.retriever.search(missing, k)):
+                self.cache[q] = {"k": k, "ids": [self.chunks[i].chunk_id for i in idxs]}
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.cache))
+        return [[self.position[c] for c in self.cache[q]["ids"][:k] if c in self.position] for q in queries]
 
 
 # ---------------------------------------------------------------------------

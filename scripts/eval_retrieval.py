@@ -2,8 +2,9 @@
 """Compare chunking strategies by retrieval quality on WattBot train questions.
 
 Usage:
-    python scripts/eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|chroma]
-                             [--no-query-instruction]
+    python scripts/eval_retrieval.py [--strategies hybrid hybrid_raw ...] [--retriever tfidf|bm25|chroma|hybrid]
+                             [--no-query-instruction] [--lexical bm25|tfidf] [--rrf-k 60]
+                             [--fusion-depth 50] [--dense-weight 1]
 
 Chunks are rebuilt from documents/parsed_json for each strategy. Only questions whose
 gold documents have been parsed are scored. Per-question results (for failure analysis)
@@ -11,6 +12,9 @@ go to documents/eval/<strategy>__<retriever>.csv.
 
 --retriever chroma embeds with the configured Qwen model (needs OPENAI_API_KEY + UW VPN) and
 reuses the persisted index in documents/chroma, so only new or changed chunks are embedded.
+--retriever hybrid fuses a lexical ranking (--lexical, default BM25) with that dense ranking using
+reciprocal rank fusion (docs/hybrid_retrieval_design.md); it also needs the gateway. To compare many
+fusion settings, use scripts/sweep_rrf.py, which caches the dense rankings.
 """
 import argparse
 import csv
@@ -22,7 +26,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wattbot.chunking import REGISTRY, build_pipeline
 from wattbot.embeddings import EmbeddingConfigurationError
-from wattbot.eval import ChromaRetriever, TfidfRetriever, evaluate, load_questions
+from wattbot.eval import (BM25Retriever, ChromaRetriever, FusionRetriever, TfidfRetriever, evaluate,
+                          load_questions)
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
@@ -31,17 +36,30 @@ COLUMNS = ["doc_recall@1", "doc_recall@5", "passage_recall@1", "passage_recall@5
 
 
 def make_retriever(args, strategy):
-    if args.retriever == "tfidf":
-        return TfidfRetriever()
-    return ChromaRetriever(strategy, query_instruction=not args.no_query_instruction)
+    lexical = {"tfidf": TfidfRetriever, "bm25": BM25Retriever}
+    if args.retriever in lexical:
+        return lexical[args.retriever]()
+    dense = ChromaRetriever(strategy, query_instruction=not args.no_query_instruction)
+    if args.retriever == "hybrid":
+        return FusionRetriever([lexical[args.lexical](), dense], k_rrf=args.rrf_k, depth=args.fusion_depth,
+                               weights=[1.0, args.dense_weight])
+    return dense
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--strategies", nargs="+", default=sorted(REGISTRY), choices=sorted(REGISTRY))
-    parser.add_argument("--retriever", default="tfidf", choices=["tfidf", "chroma"])
+    parser.add_argument("--retriever", default="tfidf", choices=["tfidf", "bm25", "chroma", "hybrid"])
     parser.add_argument("--no-query-instruction", action="store_true",
-                        help="chroma: embed raw questions without the Qwen query instruction")
+                        help="chroma/hybrid: embed raw questions without the Qwen query instruction")
+    parser.add_argument("--lexical", default="bm25", choices=["bm25", "tfidf"],
+                        help="hybrid: lexical retriever fused with dense")
+    parser.add_argument("--rrf-k", type=int, default=60,
+                        help="hybrid: RRF smoothing constant; larger values flatten the weight of top ranks")
+    parser.add_argument("--fusion-depth", type=int, default=50,
+                        help="hybrid: chunks each retriever contributes to the fusion")
+    parser.add_argument("--dense-weight", type=float, default=1.0,
+                        help="hybrid: weight of the dense ranking relative to the lexical one (1 = equal)")
     parser.add_argument("--max-tokens", type=int)
     args = parser.parse_args()
 
