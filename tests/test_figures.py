@@ -23,14 +23,16 @@ GOOD_REPLY = json.dumps({
 class FakeVision:
     """Stands in for the OpenAI client: returns canned chat replies and records the requests."""
 
-    def __init__(self, reply=GOOD_REPLY, models=("qwen3-vl-embedding-8b", "qwen3-vl-8b-instruct", "llama-3")):
-        self.reply, self.calls = reply, []
+    def __init__(self, reply=GOOD_REPLY, models=("qwen3-vl-embedding-8b", "qwen3-vl-8b-instruct", "llama-3"),
+                 finish_reason="stop", reasoning=None):
+        self.reply, self.calls, self.finish_reason, self.reasoning = reply, [], finish_reason, reasoning
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
         self.models = SimpleNamespace(list=lambda: SimpleNamespace(data=[SimpleNamespace(id=m) for m in models]))
 
     def _create(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self.reply))])
+        message = SimpleNamespace(content=self.reply, reasoning_content=self.reasoning)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=self.finish_reason)])
 
 
 def _png(path, size=(200, 120)):
@@ -148,8 +150,35 @@ def test_reasoning_prefix_is_stripped(tmp_path):
     assert record["result"]["kind"] == "bar_chart" and "parse_error" not in record["result"]
     out = figures.answer_from_figure(FakeVision(reply="<think>hm</think>7 Wh"), "vlm", "q", _png(tmp_path / "g.png"))
     assert out == "7 Wh"
-    with pytest.raises(figures.VisionModelError, match="MAX_TOKENS"):
+    with pytest.raises(figures.VisionModelError, match="no usable reply"):
         figures.describe_image(FakeVision(reply="<think>never finished</think>"), "vlm", _png(tmp_path / "h.png"))
+
+
+def test_a_reply_that_ran_out_of_tokens_is_an_error_not_a_cached_fragment(tmp_path):
+    image = _png(tmp_path / "f.png")
+    # the gateway splits reasoning into its own field and the budget ran out before any answer
+    client = FakeVision(reply=None, finish_reason="length", reasoning="x" * 5000)
+    with pytest.raises(figures.VisionModelError, match=r"finish_reason=length.*separate reasoning 5000 chars"):
+        figures.describe_image(client, "vlm", image)
+    # cut off while still thinking: the unclosed <think> text must not become the figure's summary
+    with pytest.raises(figures.VisionModelError, match="no usable reply"):
+        figures.describe_image(FakeVision(reply="<think>The bars are", finish_reason="length"), "vlm", image)
+    # cut off in the middle of the JSON
+    with pytest.raises(figures.VisionModelError, match="truncated"):
+        figures.describe_image(FakeVision(reply=GOOD_REPLY[:60], finish_reason="length"), "vlm", image)
+    # a normal stop with a non-JSON reply is still recorded, flagged
+    record = figures.describe_image(FakeVision(reply="a chart of energy"), "vlm", image)
+    assert record["result"]["parse_error"]
+
+
+def test_token_budget_and_thinking_switch_reach_the_request(tmp_path):
+    image = _png(tmp_path / "f.png")
+    client = FakeVision()
+    figures.describe_image(client, "vlm", image)
+    assert client.calls[0]["max_tokens"] == figures.MAX_TOKENS and "extra_body" not in client.calls[0]
+    figures.describe_image(client, "vlm", image, max_tokens=123, extra_body=figures.NO_THINKING)
+    assert client.calls[1]["max_tokens"] == 123
+    assert client.calls[1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_empty_reply_is_an_error(tmp_path):

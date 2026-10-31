@@ -3,7 +3,7 @@
 
 Usage:
     python scripts/describe_figures.py [doc_id ...] [--workers 4] [--limit N] [--force] [--dry-run]
-                                       [--model NAME] [--min-pixels 10000]
+                                       [--model NAME] [--min-pixels 10000] [--max-tokens 8000] [--no-thinking]
 
 Reads documents/figures/<doc_id>/figure_NN.png (written by scripts/parse_pdfs.py) together with the
 caption and in-figure labels from documents/parsed_json/<doc_id>.json, and writes the model's
@@ -60,8 +60,9 @@ def plan_document(doc_id: str, args) -> tuple[list[dict], dict]:
     return todo, counts
 
 
-def describe(client, model: str, job: dict) -> None:
-    record = figures.describe_image(client, model, job["image"], job["caption"], job["labels"])
+def describe(client, model: str, job: dict, max_tokens: int, extra_body: dict | None) -> None:
+    record = figures.describe_image(client, model, job["image"], job["caption"], job["labels"],
+                                    max_tokens=max_tokens, extra_body=extra_body)
     figures.save_record(job["out"], record)
 
 
@@ -72,6 +73,10 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="parallel requests")
     parser.add_argument("--limit", type=int, help="read at most this many figures (smoke test)")
     parser.add_argument("--min-pixels", type=int, default=10_000, help="skip images with fewer pixels than this")
+    parser.add_argument("--max-tokens", type=int, default=figures.MAX_TOKENS,
+                        help="reply budget per figure; a reasoning model spends part of it thinking")
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="ask the gateway to switch the model's reasoning off (faster; may be ignored or rejected)")
     parser.add_argument("--force", action="store_true", help="re-read figures that already have a reading")
     parser.add_argument("--dry-run", action="store_true", help="count the work and exit")
     args = parser.parse_args()
@@ -104,7 +109,8 @@ def main():
 
     failed, start = [], time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(describe, client, model, job): job for job in jobs}
+        extra_body = figures.NO_THINKING if args.no_thinking else None
+        futures = {pool.submit(describe, client, model, job, args.max_tokens, extra_body): job for job in jobs}
         for n, future in enumerate(as_completed(futures), 1):
             job = futures[future]
             try:
