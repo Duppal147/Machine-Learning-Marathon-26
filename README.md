@@ -29,7 +29,7 @@ Design notes and retrieval results: [docs/chunking_design.md](docs/chunking_desi
 
 ## Sharing the processed corpus (skip parsing and embedding)
 
-`documents/` is gitignored, so the parsed JSON, chunks and Chroma index are shared as snapshots
+`documents/` is gitignored, so the parsed JSON, chunks, chart readings and Chroma index are shared as snapshots
 published as GitHub Releases (`index-<timestamp>`) on this repo:
 
 ```bash

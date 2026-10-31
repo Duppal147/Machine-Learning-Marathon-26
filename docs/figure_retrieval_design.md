@@ -86,6 +86,12 @@ uv run python scripts/eval_figures.py --retriever hybrid
 uv run python scripts/ask_figures.py "What operational energy footprint reduction did Facebook achieve over two years?" --ref-id wu2021a --read 1
 ```
 
+**Teammates can skip step 2.** The readings (about an hour of gateway calls) are a snapshot part, `figure_text`, so `fetch_index.py` installs them. After that, `chunk_docs.py --strategy hybrid_fig` works without running `describe_figures.py`, and the Chroma collection `hybrid_fig__…` comes with the snapshot if its publisher ran `vector_index.py index --strategy hybrid_fig` first. Snapshots still don't include the figure PNGs, which `ask_figures.py` and `review_figures.py` need; write them with `parse_pdfs.py --all --force`. If you re-run `describe_figures.py` after regenerating the PNGs, it re-reads any figure whose image bytes differ from the one the cached reading was made from, so don't run it just to "refresh". To share your readings:
+
+```bash
+uv run python scripts/publish_index.py --upload     # includes figure_text and the hybrid_fig index if present
+```
+
 Inspect `documents/figure_text/<doc>/figure_NN.json` next to `documents/figures/<doc>/figure_NN.png` for a few charts before running everything: the data table is only as good as the model's reading.
 
 ## 6. Known limits and next steps

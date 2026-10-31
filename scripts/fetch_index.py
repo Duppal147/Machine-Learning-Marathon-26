@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download and install a shared corpus snapshot (parsed JSON, chunks, Chroma index).
+"""Download and install a shared corpus snapshot (parsed JSON, chunks, chart readings, Chroma index).
 
 Usage:
     python scripts/fetch_index.py                    # latest snapshot release

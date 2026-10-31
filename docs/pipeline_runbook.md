@@ -41,7 +41,7 @@ uv sync                                   # installs docling, chromadb, openai, 
   ```
 
 ### 0b. Shortcut: start from a teammate's snapshot
-If someone has already published a snapshot, fetch it and skip straight to **step 6**. The snapshot contains the parsed JSON, the chunks, the Chroma index (if it was built) and the `ref_id` metadata:
+If someone has already published a snapshot, fetch it and skip straight to **step 6**. The snapshot contains the parsed JSON, the chunks, the chart readings from step 2b (`figure_text`, if the publisher made them), the Chroma index (if it was built) and the `ref_id` metadata. It does not contain the figure PNGs (step 2):
 ```bash
 uv run python scripts/fetch_index.py --list      # see what's available
 uv run python scripts/fetch_index.py             # install the latest into documents/ and WattBot2026/

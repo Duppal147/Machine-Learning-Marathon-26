@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the processed corpus (parsed JSON, chunks, Chroma index) and publish it as a GitHub Release.
+"""Package the processed corpus (parsed JSON, chunks, chart readings, Chroma index) and publish it as a GitHub Release.
 
 Usage:
     python scripts/publish_index.py                 # build documents/snapshots/wattbot-index-<ts>.tar.gz only
