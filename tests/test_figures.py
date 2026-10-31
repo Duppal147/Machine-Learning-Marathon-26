@@ -142,6 +142,16 @@ def test_large_images_are_downscaled(tmp_path):
     assert sent.size == (1000, 250)
 
 
+def test_reasoning_prefix_is_stripped(tmp_path):
+    reply = '<think>The bars are {3, 7}. Let me answer.\n</think>\n' + GOOD_REPLY
+    record = figures.describe_image(FakeVision(reply=reply), "vlm", _png(tmp_path / "f.png"))
+    assert record["result"]["kind"] == "bar_chart" and "parse_error" not in record["result"]
+    out = figures.answer_from_figure(FakeVision(reply="<think>hm</think>7 Wh"), "vlm", "q", _png(tmp_path / "g.png"))
+    assert out == "7 Wh"
+    with pytest.raises(figures.VisionModelError, match="MAX_TOKENS"):
+        figures.describe_image(FakeVision(reply="<think>never finished</think>"), "vlm", _png(tmp_path / "h.png"))
+
+
 def test_empty_reply_is_an_error(tmp_path):
     with pytest.raises(figures.VisionModelError):
         figures.describe_image(FakeVision(reply="  "), "vlm", _png(tmp_path / "f.png"))
@@ -161,6 +171,8 @@ def test_resolve_vision_model(monkeypatch):
     assert figures.resolve_vision_model(FakeVision(), "explicit") == "explicit"
     with pytest.raises(figures.VisionModelError, match="VISION_MODEL"):
         figures.resolve_vision_model(FakeVision(models=("qwen3-vl-8b", "qwen2.5-vl-72b")))
+    with pytest.raises(figures.VisionModelError, match="No model name contains 'vl'"):
+        figures.resolve_vision_model(FakeVision(models=("churro-3b", "qwen3-vl-embedding-8b", "qwen3.8-27b")))
     monkeypatch.setattr(figures.config, "VISION_MODEL", "from-env")
     assert figures.resolve_vision_model(FakeVision()) == "from-env"
 

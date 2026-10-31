@@ -152,8 +152,13 @@ def resolve_vision_model(client: Any, configured: str = "") -> str:
         return candidates[0]
     raise VisionModelError(
         "set VISION_MODEL to a vision chat model the gateway serves. "
-        + (f"Candidates: {', '.join(candidates)}. " if candidates else "")
+        + (f"Candidates: {', '.join(candidates)}. " if candidates else
+           "No model name contains 'vl'; if a general chat model is multimodal, set VISION_MODEL to it and "
+           "run scripts/check_vision_model.py to test image input. ")
         + f"All models: {', '.join(sorted(ids))}")
+
+
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL)  # reasoning models may prefix their answer with this
 
 
 def _chat(client: Any, model: str, prompt: str, data_url: str) -> str:
@@ -170,10 +175,11 @@ def _chat(client: Any, model: str, prompt: str, data_url: str) -> str:
             ]}],
         )
 
-    content = call_with_retry(call).choices[0].message.content
-    if not content or not content.strip():
-        raise VisionModelError("the vision model returned an empty reply")
-    return content.strip()
+    content = _THINK.sub("", call_with_retry(call).choices[0].message.content or "").strip()
+    if not content:
+        raise VisionModelError("the vision model returned an empty reply (a reasoning model can spend all "
+                               f"{MAX_TOKENS} tokens thinking; raise MAX_TOKENS in wattbot/figures.py)")
+    return content
 
 
 def build_prompt(caption: str, labels: list[str]) -> str:
