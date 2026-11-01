@@ -4,6 +4,7 @@
 Usage:
     python scripts/ask_figures.py "question" [--strategy hybrid_fig] [-k 5] [--read 1]
                                   [--ref-id shehabi2024] [--no-dense] [--model NAME]
+                                  [--max-tokens 8000] [--no-thinking]
 
 Searches only the figure chunks of documents/chunks/<strategy>.jsonl: BM25 over their text fused with
 dense Qwen retrieval (RRF, as in docs/hybrid_retrieval_design.md). The top --read figures are then sent
@@ -38,6 +39,16 @@ def search_figures(question: str, chunks, k: int, strategy: str, dense: bool) ->
     return [chunks[i] for i in rrf_fuse(rankings, 60, limit=k)]
 
 
+def read_with_retry(client, model: str, question: str, image: Path, context: str, max_tokens: int,
+                    extra_body: dict | None) -> str:
+    """Read one chart; if a reasoning model spends the whole budget thinking, retry once with double."""
+    try:
+        return figures.answer_from_figure(client, model, question, image, context, max_tokens, extra_body)
+    except figures.VisionModelError:
+        print(f"  no answer within {max_tokens} tokens; retrying with {max_tokens * 2}", flush=True)
+        return figures.answer_from_figure(client, model, question, image, context, max_tokens * 2, extra_body)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("question")
@@ -47,6 +58,10 @@ def main():
     parser.add_argument("--ref-id", help="only search one document (WattBot ref_id)")
     parser.add_argument("--no-dense", action="store_true", help="BM25 only")
     parser.add_argument("--model", default="")
+    parser.add_argument("--max-tokens", type=int, default=figures.MAX_TOKENS,
+                        help="reply budget per figure (retried once at double if the model runs out)")
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="ask the gateway to switch the model's reasoning off (faster; may be ignored or rejected)")
     args = parser.parse_args()
 
     chunks_path = CHUNKS_DIR / f"{args.strategy}.jsonl"
@@ -68,13 +83,17 @@ def main():
 
         client = create_embedding_client()
         model = figures.resolve_vision_model(client, args.model)
+        extra_body = figures.NO_THINKING if args.no_thinking else None
         for c in top[:args.read]:
             image = figures.figure_image_path(c.doc_id, c.metadata["figure_index"])
             if not image.exists():
                 print(f"\n{c.chunk_id}: image {image} not found (run scripts/parse_pdfs.py)")
                 continue
             print(f"\n--- {c.metadata.get('ref_id', c.doc_id)} {image.name} (read with {model}) ---")
-            print(figures.answer_from_figure(client, model, args.question, image, context=c.text))
+            try:
+                print(read_with_retry(client, model, args.question, image, c.text, args.max_tokens, extra_body))
+            except figures.VisionModelError as error:  # one hard chart shouldn't stop the others
+                print(f"error: {error}")
     except (EmbeddingConfigurationError, figures.VisionModelError) as error:
         sys.exit(f"error: {error} (see README: BadgerBrain gateway setup)")
 
