@@ -21,10 +21,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wattbot import figures
 from wattbot.chunking import ChunkStore
-from wattbot.embeddings import EmbeddingConfigurationError, create_embedding_client
+from wattbot.embeddings import CachedEmbedder, EmbeddingConfigurationError, create_embedding_client
 from wattbot.figure_qa import FigureSearcher, read_with_retry
 
 CHUNKS_DIR = Path("documents/chunks")
+QUERY_CACHE_PATH = Path("documents/eval/query_embeddings.json")
 
 
 def main():
@@ -40,6 +41,8 @@ def main():
                         help="reply budget per figure (retried once at double if the model runs out)")
     parser.add_argument("--no-thinking", action="store_true",
                         help="ask the gateway to switch the model's reasoning off (faster; may be ignored or rejected)")
+    parser.add_argument("--fresh-queries", action="store_true",
+                        help="embed the question again instead of reusing its cached vector (the ranking may vary slightly)")
     parser.add_argument("--prompt", choices=sorted(figures.ANSWER_PROMPTS), default="default",
                         help="'scope' makes the model reject charts on a related but different subject")
     args = parser.parse_args()
@@ -56,7 +59,8 @@ def main():
         store = None
         if not args.no_dense:
             from wattbot.vectorstore import ChunkVectorStore
-            store = ChunkVectorStore(args.strategy)
+            store = ChunkVectorStore(args.strategy, embed_fn=None if args.fresh_queries
+                                     else CachedEmbedder(QUERY_CACHE_PATH))
         top = FigureSearcher(chunks, store).search(args.question, args.k, ref_id=args.ref_id)
         for rank, c in enumerate(top, 1):
             caption = " ".join(c.text.split("\n")[1:2])[:110]

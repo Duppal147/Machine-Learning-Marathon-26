@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from . import config
@@ -149,3 +152,36 @@ def embed_texts(texts: list[str], client: Any | None = None) -> list[list[float]
 def embed_text(text: str, client: Any | None = None) -> list[float]:
     """Embed one arbitrary text string as a 4096-dimensional vector."""
     return embed_texts([text], client=client)[0]
+
+
+class CachedEmbedder:
+    """Embed texts with `embed_texts`, remembering every vector on disk by (model, text).
+
+    The gateway does not return bit-identical vectors for the same text: batch composition shifts the
+    numerics, and scripts/check_text_embeddings.py accepts cosine >= 0.9999 between repeats. That is
+    invisible in one vector but enough to reorder close search results, so two runs of the same question
+    can return different charts. Passing this as a ChunkVectorStore's `embed_fn` for searches makes the
+    same query always embed the same way, so evaluations are repeatable.
+
+    Only for queries: a vector is ~80 KB as JSON, so caching every chunk would take hundreds of MB.
+    """
+
+    def __init__(self, path: Path, embed_fn=None):
+        self.path = Path(path)
+        self.embed_fn = embed_fn or embed_texts
+        self.cache: dict[str, list[float]] = json.loads(self.path.read_text()) if self.path.exists() else {}
+
+    @staticmethod
+    def key(text: str) -> str:
+        return hashlib.sha256(f"{config.EMBEDDING_MODEL}\n{text}".encode()).hexdigest()
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        missing = list(dict.fromkeys(t for t in texts if self.key(t) not in self.cache))
+        if missing:
+            for text, vector in zip(missing, self.embed_fn(missing)):
+                self.cache[self.key(text)] = vector
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self.cache))
+            tmp.replace(self.path)  # atomic, so an interrupted run never leaves a half-written cache
+        return [self.cache[self.key(t)] for t in texts]

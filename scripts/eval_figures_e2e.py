@@ -21,7 +21,9 @@ reply equals answer_value at its precision (28.5 matches 28.54, not 28.4; 2007 m
 --oracle-doc searches only the gold document, which separates reading errors from retrieval errors.
 --prompt takes several names (e.g. `--prompt default scope`): retrieval runs once and every prompt reads the
 same charts, so the comparison cannot be confounded by retrieval varying between runs.
-Replies are cached in documents/eval/figures_e2e_cache.json, so a rerun only pays for new reads. The
+Replies are cached in documents/eval/figures_e2e_cache.json, so a rerun only pays for new reads, and
+query embeddings in documents/eval/query_embeddings.json, so a rerun retrieves the same charts (the gateway's
+vectors for one text differ slightly between calls, enough to reorder close results; --fresh-queries opts out). The
 per-question detail goes to documents/eval/figures_e2e__<strategy>.csv: read it, because a unit or rounding
 difference from answer_value shows up there as a "wrong" number. About 3 gateway calls per question.
 """
@@ -39,13 +41,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from wattbot import figures
 from wattbot.chunking import ChunkStore
-from wattbot.embeddings import EmbeddingConfigurationError, create_embedding_client
+from wattbot.embeddings import CachedEmbedder, EmbeddingConfigurationError, create_embedding_client
 from wattbot.eval import evaluate_e2e, load_figure_questions
 from wattbot.figure_qa import FigureSearcher, read_with_retry
 
 CHUNKS_DIR = Path("documents/chunks")
 EVAL_OUT = Path("documents/eval")
 CACHE_PATH = EVAL_OUT / "figures_e2e_cache.json"
+QUERY_CACHE_PATH = EVAL_OUT / "query_embeddings.json"
 
 
 def main():
@@ -65,6 +68,9 @@ def main():
                         help="answer prompt(s); 'scope' makes the model reject charts on a related but different "
                              "subject. Several are compared on the same retrieved charts")
     parser.add_argument("--no-cache", action="store_true", help="ignore and don't write the reply cache")
+    parser.add_argument("--fresh-queries", action="store_true",
+                        help="embed the questions again instead of reusing the cached query vectors (results may vary "
+                             "slightly between runs)")
     args = parser.parse_args()
 
     chunks_path = CHUNKS_DIR / f"{args.strategy}.jsonl"
@@ -88,7 +94,9 @@ def main():
         store = None
         if not args.no_dense:
             from wattbot.vectorstore import ChunkVectorStore
-            store = ChunkVectorStore(args.strategy)
+            # cached query vectors make repeated runs retrieve the same charts (see CachedEmbedder)
+            store = ChunkVectorStore(args.strategy, embed_fn=None if args.fresh_queries
+                                     else CachedEmbedder(QUERY_CACHE_PATH))
         searcher = FigureSearcher(chunks, store)
         client = create_embedding_client()
         model = figures.resolve_vision_model(client, args.model)

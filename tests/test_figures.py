@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from wattbot import figures
+from wattbot import config, figures
 from wattbot.chunking import Block, Chunk, DoclingJsonLoader, HybridChunker, build_pipeline
 from wattbot.eval import FigureQuestion, evaluate_figures
 from wattbot.eval.figures import answer_number, figure_numbers, is_caption_of, load_figure_questions, numbers_in
@@ -495,3 +495,57 @@ def test_scope_prompt_is_selectable_and_default_is_unchanged(tmp_path):
     # read_with_retry carries the choice through, including on the retried call
     read_with_retry(client, "vlm", "How much?", image, "ctx", 100, None, prompt="scope")
     assert "is the one the question is about" in client.calls[-1]["messages"][0]["content"][0]["text"]
+
+
+# --- repeatable query embeddings --------------------------------------------------------------------
+
+from wattbot.embeddings import CachedEmbedder
+from wattbot.vectorstore import ChunkVectorStore
+
+
+def test_cached_embedder_asks_the_gateway_once_per_text_and_survives_a_restart(tmp_path, monkeypatch):
+    calls = []
+
+    def gateway(texts):
+        calls.append(list(texts))
+        return [[float(len(t)), 1.0] for t in texts]
+
+    path = tmp_path / "q.json"
+    embed = CachedEmbedder(path, embed_fn=gateway)
+    assert embed(["aa", "b", "aa"]) == [[2.0, 1.0], [1.0, 1.0], [2.0, 1.0]]   # order kept, duplicate sent once
+    assert calls == [["aa", "b"]]
+    assert embed(["b", "aa"]) == [[1.0, 1.0], [2.0, 1.0]] and len(calls) == 1  # all cached
+    assert embed(["new", "aa"]) == [[3.0, 1.0], [2.0, 1.0]] and calls[-1] == ["new"]  # only the missing one
+
+    again = CachedEmbedder(path, embed_fn=gateway)                          # a new process reads the file
+    assert again(["aa", "new"]) == [[2.0, 1.0], [3.0, 1.0]] and len(calls) == 2
+    assert not list(tmp_path.glob("*.tmp"))
+
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", "another-model")
+    assert CachedEmbedder(path, embed_fn=gateway)(["aa"]) == [[2.0, 1.0]] and len(calls) == 3  # the model is in the key
+
+
+def test_cached_query_vectors_make_repeated_searches_identical(tmp_path):
+    """A gateway whose vectors jitter slightly per call reorders results; the cache removes that."""
+    state = {"n": 0}
+
+    def jittery(texts):
+        state["n"] += 1
+        wobble = 0.02 * (state["n"] % 3)
+        return [[1.0 + (0.0 if "water" not in t else 0.5), float(len(t) % 5) + wobble, 1.0] for t in texts]
+
+    def chunks():
+        return [Chunk("d", f"water chunk {i}" if i % 2 else f"power chunk {i}", (), [1], "figure", [],
+                      chunk_id=f"d::s::{i}", strategy="s", metadata={"ref_id": "r"}) for i in range(12)]
+
+    def top(store):
+        return [(h.chunk_id, round(h.score, 9)) for h in store.search("water use", k=12, instruction=None)]
+
+    plain = ChunkVectorStore("s", path=tmp_path / "a", model="fake", embed_fn=jittery)
+    plain.index(chunks())
+    assert top(plain) != top(plain)                      # two identical searches disagree: the symptom
+
+    cached = ChunkVectorStore("s", path=tmp_path / "b", model="fake",
+                              embed_fn=CachedEmbedder(tmp_path / "q.json", embed_fn=jittery))
+    cached.index(chunks())
+    assert top(cached) == top(cached) == top(cached)     # repeatable
