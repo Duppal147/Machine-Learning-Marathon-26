@@ -4,7 +4,7 @@
 Usage:
     python scripts/eval_figures_e2e.py [--strategy hybrid_fig] [--reads 3] [--tolerance 0]
                                        [--oracle-doc] [--no-dense] [--limit N] [--workers 3]
-                                       [--model NAME] [--max-tokens 8000] [--no-thinking] [--prompt default|scope]
+                                       [--model NAME] [--max-tokens 8000] [--no-thinking] [--prompt default [scope ...]]
                                        [--no-cache]
 
 For each Figure-flagged train question with a plain numeric answer, finds the best figure chunks (BM25 +
@@ -19,6 +19,8 @@ reply equals answer_value at its precision (28.5 matches 28.54, not 28.4; 2007 m
     wrong_number@1    the first chart read gave a number, and it was wrong (the costly failure)
 
 --oracle-doc searches only the gold document, which separates reading errors from retrieval errors.
+--prompt takes several names (e.g. `--prompt default scope`): retrieval runs once and every prompt reads the
+same charts, so the comparison cannot be confounded by retrieval varying between runs.
 Replies are cached in documents/eval/figures_e2e_cache.json, so a rerun only pays for new reads. The
 per-question detail goes to documents/eval/figures_e2e__<strategy>.csv: read it, because a unit or rounding
 difference from answer_value shows up there as a "wrong" number. About 3 gateway calls per question.
@@ -59,8 +61,9 @@ def main():
     parser.add_argument("--model", default="")
     parser.add_argument("--max-tokens", type=int, default=figures.MAX_TOKENS)
     parser.add_argument("--no-thinking", action="store_true")
-    parser.add_argument("--prompt", choices=sorted(figures.ANSWER_PROMPTS), default="default",
-                        help="answer prompt; 'scope' makes the model reject charts on a related but different subject")
+    parser.add_argument("--prompt", nargs="+", choices=sorted(figures.ANSWER_PROMPTS), default=["default"],
+                        help="answer prompt(s); 'scope' makes the model reject charts on a related but different "
+                             "subject. Several are compared on the same retrieved charts")
     parser.add_argument("--no-cache", action="store_true", help="ignore and don't write the reply cache")
     args = parser.parse_args()
 
@@ -102,13 +105,14 @@ def main():
         return retrieved[q.id]
 
     # the prompt text is part of the cache key, so editing a prompt never serves replies written for the old one
-    prompt_id = f"{args.prompt}-{hashlib.sha256(figures.ANSWER_PROMPTS[args.prompt].encode()).hexdigest()[:8]}"
+    prompt_ids = {name: f"{name}-{hashlib.sha256(figures.ANSWER_PROMPTS[name].encode()).hexdigest()[:8]}"
+                  for name in args.prompt}
     cache: dict[str, str] = {} if args.no_cache or not CACHE_PATH.exists() else json.loads(CACHE_PATH.read_text())
     failures: dict[str, str] = {}
     lock = threading.Lock()
 
-    def read(q, chunk):
-        key = f"{model}|{int(args.no_thinking)}|{args.max_tokens}|{prompt_id}|{chunk.chunk_id}|{q.question}"
+    def read(q, chunk, prompt):
+        key = f"{model}|{int(args.no_thinking)}|{args.max_tokens}|{prompt_ids[prompt]}|{chunk.chunk_id}|{q.question}"
         with lock:
             if key in cache:
                 return cache[key]
@@ -119,7 +123,7 @@ def main():
             raise FileNotFoundError(f"{image} not found (run scripts/parse_pdfs.py)")
         try:
             reply = read_with_retry(client, model, q.question, image, chunk.text, args.max_tokens, extra_body,
-                                  prompt=args.prompt)
+                                    prompt=prompt)
         except figures.VisionModelError as error:
             with lock:
                 failures[key] = str(error)
@@ -128,48 +132,58 @@ def main():
             cache[key] = reply
         return reply
 
-    pairs = [(q, c) for q in questions for c in retrieve(q)]
-    print(f"{len(questions)} questions, {len(pairs)} chart reads with {model} ({args.workers} workers)", flush=True)
+    # retrieval happens once; every prompt then reads exactly these charts
+    jobs = [(q, c, name) for q in questions for c in retrieve(q) for name in args.prompt]
+    print(f"{len(questions)} questions, {len(jobs)} chart reads with {model} ({args.workers} workers, "
+          f"prompts: {', '.join(args.prompt)})", flush=True)
 
-    def warm(pair):
+    def warm(job):
         try:
-            read(*pair)
+            read(*job)
         except (figures.VisionModelError, OSError):
             pass  # recorded in `failures`; evaluate_e2e reports it per read
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        list(pool.map(warm, pairs))
+        list(pool.map(warm, jobs))
     if not args.no_cache:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CACHE_PATH.write_text(json.dumps(cache))
 
-    summary, results = evaluate_e2e(questions, retrieve, read, n_reads=args.reads, tolerance=args.tolerance)
-
-    EVAL_OUT.mkdir(parents=True, exist_ok=True)
-    out = EVAL_OUT / f"figures_e2e__{args.strategy}{'__oracle' if args.oracle_doc else ''}{'' if args.prompt == 'default' else '__' + args.prompt}.csv"
-    with open(out, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["id", "gold", "rank", "ref_id", "figure_index", "from_gold_doc", "correct", "numbers",
-                         "reply_first_line"])
-        for res in results:
-            for r in res.reads:
-                first = next((line for line in r.reply.splitlines() if line.strip()), "")
-                writer.writerow([res.id, res.gold, r.rank, r.ref_id, r.figure_index, int(r.from_gold_doc),
-                                 int(r.correct), " ".join(map(str, r.numbers)), first[:200]])
-
-    print(f"\n{'id':<6}{'gold':>9}  reads (rank: chart -> numbers; * = right number, g = gold document)")
-    for res in results:
-        cells = [f"{r.rank}: {r.ref_id}/fig{r.figure_index:02d} -> {','.join(map(str, r.numbers)) or '-'}"
-                 f"{'*' if r.correct else ''}{'g' if r.from_gold_doc else ''}" for r in res.reads]
-        print(f"{res.id:<6}{res.gold:>9g}  " + "  |  ".join(cells))
-
     n = args.reads
-    print(f"\nstrategy={args.strategy}{' (oracle doc)' if args.oracle_doc else ''}  prompt={args.prompt}  questions={summary['questions']}  "
-          f"reads/question={n}  tolerance={args.tolerance:g}  read errors={summary['read_errors']}")
-    for key in ["gold_doc_read@1", f"gold_doc_read@{n}", "answer@1", f"answer@{n}", "strict_answer@1",
-                f"strict_answer@{n}", "wrong_number@1"]:
-        print(f"  {key:<20}{summary[key]:.3f}")
-    print(f"per-question detail -> {out}")
+    metrics = ["gold_doc_read@1", f"gold_doc_read@{n}", "answer@1", f"answer@{n}", "strict_answer@1",
+               f"strict_answer@{n}", "wrong_number@1"]
+    summaries = {}
+    EVAL_OUT.mkdir(parents=True, exist_ok=True)
+    for name in args.prompt:
+        summary, results = evaluate_e2e(questions, retrieve, lambda q, c, name=name: read(q, c, name),
+                                        n_reads=n, tolerance=args.tolerance)
+        summaries[name] = summary
+        out = EVAL_OUT / (f"figures_e2e__{args.strategy}{'__oracle' if args.oracle_doc else ''}"
+                          f"{'' if name == 'default' else '__' + name}.csv")
+        with open(out, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "gold", "rank", "ref_id", "figure_index", "from_gold_doc", "correct", "numbers",
+                             "reply_first_line"])
+            for res in results:
+                for r in res.reads:
+                    first = next((line for line in r.reply.splitlines() if line.strip()), "")
+                    writer.writerow([res.id, res.gold, r.rank, r.ref_id, r.figure_index, int(r.from_gold_doc),
+                                     int(r.correct), " ".join(map(str, r.numbers)), first[:200]])
+
+        print(f"\n=== prompt: {name} ===")
+        print(f"{'id':<6}{'gold':>9}  reads (rank: chart -> numbers; * = right number, g = gold document)")
+        for res in results:
+            cells = [f"{r.rank}: {r.ref_id}/fig{r.figure_index:02d} -> {','.join(map(str, r.numbers)) or '-'}"
+                     f"{'*' if r.correct else ''}{'g' if r.from_gold_doc else ''}" for r in res.reads]
+            print(f"{res.id:<6}{res.gold:>9g}  " + "  |  ".join(cells))
+        print(f"per-question detail -> {out}")
+
+    print(f"\nstrategy={args.strategy}{' (oracle doc)' if args.oracle_doc else ''}  "
+          f"questions={summaries[args.prompt[0]]['questions']}  reads/question={n}  tolerance={args.tolerance:g}")
+    print(f"{'':<20}" + "".join(f"{name:>10}" for name in args.prompt))
+    for key in metrics:
+        print(f"  {key:<18}" + "".join(f"{summaries[name][key]:>10.3f}" for name in args.prompt))
+    print(f"  {'read errors':<18}" + "".join(f"{summaries[name]['read_errors']:>10}" for name in args.prompt))
 
 
 if __name__ == "__main__":
