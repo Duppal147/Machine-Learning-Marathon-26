@@ -4,7 +4,8 @@
 Usage:
     python scripts/eval_figures_e2e.py [--strategy hybrid_fig] [--reads 3] [--tolerance 0]
                                        [--oracle-doc] [--no-dense] [--limit N] [--workers 3]
-                                       [--model NAME] [--max-tokens 8000] [--no-thinking] [--no-cache]
+                                       [--model NAME] [--max-tokens 8000] [--no-thinking] [--prompt default|scope]
+                                       [--no-cache]
 
 For each Figure-flagged train question with a plain numeric answer, finds the best figure chunks (BM25 +
 dense over all figure chunks, as scripts/ask_figures.py does), sends the top --reads chart images with the
@@ -24,6 +25,7 @@ difference from answer_value shows up there as a "wrong" number. About 3 gateway
 """
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -57,6 +59,8 @@ def main():
     parser.add_argument("--model", default="")
     parser.add_argument("--max-tokens", type=int, default=figures.MAX_TOKENS)
     parser.add_argument("--no-thinking", action="store_true")
+    parser.add_argument("--prompt", choices=sorted(figures.ANSWER_PROMPTS), default="default",
+                        help="answer prompt; 'scope' makes the model reject charts on a related but different subject")
     parser.add_argument("--no-cache", action="store_true", help="ignore and don't write the reply cache")
     args = parser.parse_args()
 
@@ -97,12 +101,14 @@ def main():
             retrieved[q.id] = searcher.search(q.question, args.reads, ref_id=ref)
         return retrieved[q.id]
 
+    # the prompt text is part of the cache key, so editing a prompt never serves replies written for the old one
+    prompt_id = f"{args.prompt}-{hashlib.sha256(figures.ANSWER_PROMPTS[args.prompt].encode()).hexdigest()[:8]}"
     cache: dict[str, str] = {} if args.no_cache or not CACHE_PATH.exists() else json.loads(CACHE_PATH.read_text())
     failures: dict[str, str] = {}
     lock = threading.Lock()
 
     def read(q, chunk):
-        key = f"{model}|{int(args.no_thinking)}|{args.max_tokens}|{chunk.chunk_id}|{q.question}"
+        key = f"{model}|{int(args.no_thinking)}|{args.max_tokens}|{prompt_id}|{chunk.chunk_id}|{q.question}"
         with lock:
             if key in cache:
                 return cache[key]
@@ -112,7 +118,8 @@ def main():
         if not image.exists():
             raise FileNotFoundError(f"{image} not found (run scripts/parse_pdfs.py)")
         try:
-            reply = read_with_retry(client, model, q.question, image, chunk.text, args.max_tokens, extra_body)
+            reply = read_with_retry(client, model, q.question, image, chunk.text, args.max_tokens, extra_body,
+                                  prompt=args.prompt)
         except figures.VisionModelError as error:
             with lock:
                 failures[key] = str(error)
@@ -139,7 +146,7 @@ def main():
     summary, results = evaluate_e2e(questions, retrieve, read, n_reads=args.reads, tolerance=args.tolerance)
 
     EVAL_OUT.mkdir(parents=True, exist_ok=True)
-    out = EVAL_OUT / f"figures_e2e__{args.strategy}{'__oracle' if args.oracle_doc else ''}.csv"
+    out = EVAL_OUT / f"figures_e2e__{args.strategy}{'__oracle' if args.oracle_doc else ''}{'' if args.prompt == 'default' else '__' + args.prompt}.csv"
     with open(out, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["id", "gold", "rank", "ref_id", "figure_index", "from_gold_doc", "correct", "numbers",
@@ -157,7 +164,7 @@ def main():
         print(f"{res.id:<6}{res.gold:>9g}  " + "  |  ".join(cells))
 
     n = args.reads
-    print(f"\nstrategy={args.strategy}{' (oracle doc)' if args.oracle_doc else ''}  questions={summary['questions']}  "
+    print(f"\nstrategy={args.strategy}{' (oracle doc)' if args.oracle_doc else ''}  prompt={args.prompt}  questions={summary['questions']}  "
           f"reads/question={n}  tolerance={args.tolerance:g}  read errors={summary['read_errors']}")
     for key in ["gold_doc_read@1", f"gold_doc_read@{n}", "answer@1", f"answer@{n}", "strict_answer@1",
                 f"strict_answer@{n}", "wrong_number@1"]:

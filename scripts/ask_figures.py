@@ -4,7 +4,7 @@
 Usage:
     python scripts/ask_figures.py "question" [--strategy hybrid_fig] [-k 5] [--read 1]
                                   [--ref-id shehabi2024] [--no-dense] [--model NAME]
-                                  [--max-tokens 8000] [--no-thinking]
+                                  [--max-tokens 8000] [--no-thinking] [--prompt default|scope]
 
 Searches only the figure chunks of documents/chunks/<strategy>.jsonl: BM25 over their text fused with
 dense Qwen retrieval (RRF, as in docs/hybrid_retrieval_design.md). The top --read figures are then sent
@@ -40,6 +40,8 @@ def main():
                         help="reply budget per figure (retried once at double if the model runs out)")
     parser.add_argument("--no-thinking", action="store_true",
                         help="ask the gateway to switch the model's reasoning off (faster; may be ignored or rejected)")
+    parser.add_argument("--prompt", choices=sorted(figures.ANSWER_PROMPTS), default="default",
+                        help="'scope' makes the model reject charts on a related but different subject")
     args = parser.parse_args()
 
     chunks_path = CHUNKS_DIR / f"{args.strategy}.jsonl"
@@ -73,7 +75,7 @@ def main():
             print(f"\n--- {c.metadata.get('ref_id', c.doc_id)} {image.name} (read with {model}) ---")
             try:
                 print(read_with_retry(client, model, args.question, image, c.text, args.max_tokens, extra_body,
-                                      on_retry=lambda n: print(f"  no answer in the first budget; retrying with {n}",
+                                      prompt=args.prompt, on_retry=lambda n: print(f"  no answer in the first budget; retrying with {n}",
                                                                flush=True)))
             except figures.VisionModelError as error:  # one hard chart shouldn't stop the others
                 print(f"error: {error}")

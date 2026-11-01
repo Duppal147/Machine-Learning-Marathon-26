@@ -58,6 +58,22 @@ Question: {question}
 Read values off the figure carefully. Give the exact number(s) as printed on the figure, with units, on the first line. On the second line say in one sentence which part of the figure you read it from. If the figure does not contain the answer, reply "not in figure"."""
 
 
+# Same task, but the model must first check that the chart is the one the question is about. A chart on a
+# related topic (another year, entity or metric) has a plausible number on it, so without this check the
+# model reads that number and answers confidently.
+ANSWER_PROMPT_SCOPE = """Answer the question using only the figure image.
+
+Caption and text extracted from the figure: {context}
+
+Question: {question}
+
+First decide whether this figure is the one the question is about: its subject, entity, time period and metric must match what the question asks. A figure on a related topic is not enough. If it does not match, reply exactly "not in figure" and stop.
+
+Otherwise read the value carefully. Give the exact number(s) as printed on the figure, with units, on the first line. On the second line say in one sentence which part of the figure you read it from. If the figure matches but does not contain the answer, reply "not in figure"."""
+
+ANSWER_PROMPTS = {"default": ANSWER_PROMPT, "scope": ANSWER_PROMPT_SCOPE}
+
+
 class VisionModelError(RuntimeError):
     """The vision model cannot be chosen or its reply cannot be used."""
 
@@ -263,10 +279,14 @@ def describe_image(client: Any, model: str, image_path: Path, caption: str = "",
 
 
 def answer_from_figure(client: Any, model: str, question: str, image_path: Path, context: str = "",
-                       max_tokens: int = MAX_TOKENS, extra_body: dict | None = None) -> str:
-    """Re-read the original image to answer one question (more exact than the cached reading)."""
+                       max_tokens: int = MAX_TOKENS, extra_body: dict | None = None,
+                       prompt: str = "default") -> str:
+    """Re-read the original image to answer one question (more exact than the cached reading).
+
+    `prompt` names an entry of ANSWER_PROMPTS ("default" or "scope").
+    """
     data_url, _ = image_data_url(image_path)
-    prompt = ANSWER_PROMPT.replace("{context}", context or "(none)").replace("{question}", question)
+    prompt = ANSWER_PROMPTS[prompt].replace("{context}", context or "(none)").replace("{question}", question)
     return _chat(client, model, prompt, data_url, max_tokens, extra_body)[0]
 
 

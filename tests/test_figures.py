@@ -477,3 +477,21 @@ def test_evaluate_e2e_scores_numbers_and_separates_coincidences():
     assert summary["strict_answer@1"] == 0 and summary["strict_answer@3"] == 0.5
     assert summary["wrong_number@1"] == 0.5                                    # q1's first read said 20
     assert summary["gold_doc_read@1"] == 0.5 and summary["gold_doc_read@3"] == 1.0
+
+
+def test_scope_prompt_is_selectable_and_default_is_unchanged(tmp_path):
+    image = _png(tmp_path / "f.png")
+    client = FakeVision(reply="28.5 percent")
+    figures.answer_from_figure(client, "vlm", "How much?", image, "ctx")
+    figures.answer_from_figure(client, "vlm", "How much?", image, "ctx", prompt="scope")
+    default_text, scope_text = (c["messages"][0]["content"][0]["text"] for c in client.calls)
+
+    assert default_text == figures.ANSWER_PROMPT.replace("{context}", "ctx").replace("{question}", "How much?")
+    assert "How much?" in scope_text and "ctx" in scope_text and "{question}" not in scope_text
+    assert "is the one the question is about" in scope_text and "is the one the question is about" not in default_text
+    assert set(figures.ANSWER_PROMPTS) == {"default", "scope"}
+    with pytest.raises(KeyError):
+        figures.answer_from_figure(client, "vlm", "q", image, prompt="nonsense")
+    # read_with_retry carries the choice through, including on the retried call
+    read_with_retry(client, "vlm", "How much?", image, "ctx", 100, None, prompt="scope")
+    assert "is the one the question is about" in client.calls[-1]["messages"][0]["content"][0]["text"]

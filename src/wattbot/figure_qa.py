@@ -85,11 +85,12 @@ class FigureSearcher:
 
 
 def read_with_retry(client: Any, model: str, question: str, image: Path, context: str, max_tokens: int,
-                    extra_body: dict | None, on_retry: Callable[[int], None] | None = None) -> str:
+                    extra_body: dict | None, on_retry: Callable[[int], None] | None = None,
+                    prompt: str = "default") -> str:
     """Read one chart; if a reasoning model spends the whole budget thinking, retry once with double."""
     try:
-        return figures.answer_from_figure(client, model, question, image, context, max_tokens, extra_body)
+        return figures.answer_from_figure(client, model, question, image, context, max_tokens, extra_body, prompt)
     except figures.VisionModelError:
         if on_retry:
             on_retry(max_tokens * 2)
-        return figures.answer_from_figure(client, model, question, image, context, max_tokens * 2, extra_body)
+        return figures.answer_from_figure(client, model, question, image, context, max_tokens * 2, extra_body, prompt)
