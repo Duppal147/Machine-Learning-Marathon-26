@@ -120,6 +120,12 @@ def test_chunk_identity_failures_and_test_failures_are_loud():
     assert "(not run by the generator)" in body and "tests were not run" in warnings
 
 
+def test_a_body_with_no_figure_chunks_warns_instead_of_sounding_fine():
+    body, warnings = build_body(_facts(chunks={"figure": 0, "text": 6033, "identical": True}))
+    assert "`hybrid_fig` has no figure chunks" in body and "hybrid_fig has no figure chunks" in warnings
+    assert "plus 0 figure chunks" not in body
+
+
 def test_shared_files_include_a_changed_lockfile():
     body, _ = build_body(_facts(files=["pyproject.toml", "src/wattbot/config.py", "docs/x.md"]))
     section = body.split("## Shared files touched")[1].split("## Results")[0]

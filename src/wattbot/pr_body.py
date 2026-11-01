@@ -85,8 +85,8 @@ def _retrieval_section(b: Body, summary: dict | None) -> None:
                  ["`hybrid_fig`", fmt(new["chunks"])] + [fmt(new[c]) for c in cols],
                  ["change", f"{int(new['chunks']) - int(old['chunks']):+d}"] + [delta(new[c], old[c]) for c in cols]]))
     b.add()
-    b.add("Figure chunks compete with text chunks in the same ranking, so a small change here is the cost of "
-          "that competition; the text chunks themselves are unchanged.")
+    b.add("The text chunks themselves are unchanged, so any change here comes from figure chunks competing with them "
+          "in the same ranking.")
 
 
 def _figures_section(b: Body, summary: dict | None) -> None:
@@ -157,7 +157,11 @@ def build_body(facts: dict) -> tuple[str, list[str]]:
               + (f", {readings['invalid']} replies were not valid JSON" if readings["invalid"] else "") + ".")
     else:
         b.warn("no chart readings found in documents/figure_text")
-    if chunks and chunks["identical"] is True:
+    if chunks and chunks["figure"] == 0:
+        b.add("- **⚠ `hybrid_fig` has no figure chunks**: the chart readings are missing or weren't chunked "
+              "(`scripts/describe_figures.py`, then `scripts/chunk_docs.py --strategy hybrid_fig`).")
+        b.warn("hybrid_fig has no figure chunks")
+    elif chunks and chunks["identical"] is True:
         b.add(f"- Existing strategies are unchanged. Figure chunks are additive: the {chunks['text']} text chunks of "
               f"`hybrid_fig` are identical to `hybrid`'s, plus {chunks['figure']} figure chunks.")
     elif chunks and chunks["identical"] is False:

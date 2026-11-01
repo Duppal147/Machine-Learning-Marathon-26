@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Write pr_body.md for the chart-retrieval PR from measured results; nothing in it is typed by hand.
+"""Write documents/pr_body.md for the chart-retrieval PR from measured results; nothing in it is typed by hand.
 
 Usage:
-    uv run --with pytest python scripts/make_pr_body.py [--run] [--base origin/main] [--out pr_body.md]
+    uv run --with pytest python scripts/make_pr_body.py [--run] [--base origin/main] [--out documents/pr_body.md]
                                                         [--skip-tests] [--strict]
 
 Reads the summaries the eval scripts save in documents/eval/ (summary__*.json, each stamped with the git
@@ -14,9 +14,9 @@ and listed at the end; --strict exits non-zero if there is any such warning.
 --run first runs the steps that produce the results: chunk_docs, vector_index, eval_retrieval, eval_figures
 and eval_figures_e2e (with and without --oracle-doc). They need the gateway (VPN + key) and take a few minutes
 plus about 30 vision calls on the first run. Commit your changes first, so the results are stamped with the
-commit being proposed. Pass --with pytest to uv so the tests can run. Don't commit pr_body.md.
+commit being proposed. Pass --with pytest to uv so the tests can run.
 
-Then: gh pr create --base main --head <branch> --title "..." --body-file pr_body.md
+Then: gh pr create --base main --head <branch> --title "..." --body-file documents/pr_body.md
 """
 import argparse
 import json
@@ -105,7 +105,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", action="store_true", help="run chunking, indexing and the evals first")
     parser.add_argument("--base", default="origin/main", help="branch the PR targets")
-    parser.add_argument("--out", type=Path, default=Path("pr_body.md"))
+    parser.add_argument("--out", type=Path, default=Path("documents/pr_body.md"),
+                        help="default is in the gitignored documents/ folder, so it can't be committed by accident")
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--strict", action="store_true", help="exit 1 if anything is missing or stale")
     args = parser.parse_args()
@@ -129,6 +130,7 @@ def main():
         "e2e_oracle": load_summary(EVAL / "summary__e2e__hybrid_fig__oracle.json"),
     }
     body, warnings = build_body(facts)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body)
 
     print(f"wrote {args.out} (PR at commit {head}{', with uncommitted changes' if dirty else ''})")
