@@ -28,9 +28,11 @@ parse_pdfs.py ──► documents/figures/<doc>/figure_NN.png
 ```
 
 1. **Reading.** `scripts/describe_figures.py` sends each figure PNG to the vision model with its caption and the labels Docling found. The model returns JSON: chart type, title, axes, legend, a markdown data table, and a short summary. Logos and photos are classified and dropped. Results are cached per image (hash plus prompt version), so re-runs only read what changed.
-2. **Figure chunks.** `src/wattbot/figures.py` renders each reading as text (caption on its own line, then axes, legend, data table, summary). The loader emits it as a `figure` block, which `HybridChunker` keeps whole like a table. The chunk's `metadata["figure_index"]` points back to the image. A picture with no reading (or one read as a logo) falls back to caption-only, exactly as before.
+2. **Figure chunks.** `src/wattbot/figures.py` renders each reading as text (caption on its own line, then axes, legend, data table, summary). The loader emits it as an extra `figure` block, and `HybridChunker` turns it into its own chunk, placed after the section's text. The caption also stays in the text flow, so **the text chunks are byte-for-byte those of `hybrid`** (a test checks this, and so did a run over all 122 documents: 6,033 text chunks plus the figure chunks). The chunk's `metadata["figure_index"]` points back to the image. A picture with no reading (or one read as a logo) just has no figure chunk.
 3. **Indexing.** Figure chunks go through the same embedding, Chroma, BM25, RRF and reranker code as text chunks. The existing `hybrid`, `hybrid_raw`, `section` and `fixed` strategies are unchanged: their output is identical to the published snapshot.
-4. **Answering.** Values extracted at indexing time can be misread, so `scripts/ask_figures.py` retrieves figure chunks and then sends the top chart's original image plus the question back to the vision model, asking for the exact printed value.
+
+   An earlier version replaced the caption with the figure chunk and let it interrupt the text flow, as tables do. That split 594 of the 6,033 text chunks and added 158 more, and cost about 3 points of passage recall@5 with dense retrieval. Making figure chunks purely additive removed that part; see §4 for what remains.
+4. **Answering.** Values extracted at indexing time can be misread, so `scripts/ask_figures.py` retrieves figure chunks and then sends the top charts' original images plus the question back to the vision model, asking for the exact printed value. A read that runs out of tokens is retried once at double the budget.
 
 ## 3. Strategies to compare
 
@@ -49,14 +51,11 @@ Planned comparison arms, not built yet: embedding the chart PNG directly with `q
 - `figure_recall@k`: a top-k chunk is the caption of a figure that `supporting_materials` names. It measures whether the right chart is found.
 - `value_recall@k`: a top-k chunk contains the numeric answer. It measures whether the exact value is searchable. A number repeated somewhere unrelated also counts, so read it next to `figure_recall`.
 
-Baseline with BM25 on the full corpus (offline, from the published snapshot's parsed JSON; 14 questions score `figure_recall`, 10 score `value_recall`):
+`scripts/eval_figures_e2e.py` scores the whole path on the numeric chart questions: it retrieves charts, reads the top `--reads` images with the vision model, and counts a question answered when a number on the first line of a reply equals `answer_value` at its precision (28.5 matches 28.54, not 28.4; 2007 matches only 2007; `--tolerance 0.01` additionally accepts 1% for estimated values). `strict_answer@k` also requires the chart to be from a gold document, so a coincidence in an unrelated chart doesn't count, and `--oracle-doc` searches only the gold document to separate reading errors from retrieval errors. Check `documents/eval/figures_e2e__<strategy>.csv`: a unit difference from `answer_value` shows up there as a wrong number.
 
-| Strategy | Figure chunks | figure@1 | figure@5 | figure@10 | value@1 | value@5 | value@10 |
-|---|---|---|---|---|---|---|---|
-| `hybrid` | 0 | 0.214 | 0.429 | 0.571 | 0.400 | 0.500 | 0.500 |
-| `hybrid_figlabels` | 631 | 0.286 | 0.429 | 0.571 | 0.400 | 0.600 | 0.600 |
+Samples are tiny (14 questions score `figure_recall`, 10 score `value_recall`; one question is 7–10 points), so treat differences of a question or two as noise.
 
-The samples are tiny (one question is 7–10 points), so treat differences of a question or two as noise. `hybrid_fig` has not been run yet: it needs the gateway.
+**Does adding figure chunks hurt text questions?** Compare passage recall with `scripts/eval_retrieval.py --retriever hybrid --strategies hybrid hybrid_fig`. With the original, text-splitting design the dense hybrid retriever lost 2.8 points at passage@5 (0.819 to 0.791) and 3.3 at @10. Offline BM25 on `hybrid_figlabels` shows the same effect split in two: the splitting cost about 1 point at @10, and the extra chunks competing with the right text chunk cost about 1 point at @5 that the additive design does not remove. Closing that gap is a retrieval-design choice (reserve slots for figure chunks, give them a separate lane, or rerank), not a chunking one.
 
 ## 5. Running it
 
@@ -82,7 +81,11 @@ uv run python scripts/vector_index.py index --strategy hybrid_fig
 uv run python scripts/eval_figures.py --retriever bm25
 uv run python scripts/eval_figures.py --retriever hybrid
 
-# 4. ask a question end to end
+# 4. score the whole path on the numeric chart questions (about 3 gateway calls per question)
+uv run python scripts/eval_figures_e2e.py --reads 3
+uv run python scripts/eval_figures_e2e.py --reads 3 --oracle-doc   # reading accuracy without retrieval errors
+
+# 5. ask a question end to end
 uv run python scripts/ask_figures.py "What operational energy footprint reduction did Facebook achieve over two years?" --ref-id wu2021a --read 1
 ```
 
@@ -101,4 +104,4 @@ Inspect `documents/figure_text/<doc>/figure_NN.json` next to `documents/figures/
 - **Images are downscaled** to 2,048 px on the longest side before upload. Very dense charts may need a higher limit (`MAX_IMAGE_SIDE`).
 - **Multi-panel figures** are read as one image. Splitting panels `(a)`, `(b)` is a possible refinement.
 - **Tables-as-images** are classified `table` and read like charts. Docling's own table extraction doesn't see them.
-- **End-to-end scoring** (numeric answer within tolerance of `answer_value`) isn't built; `ask_figures.py` prints the answer for manual review. The `Reconcile` and `Corrected` columns in `train_QA.csv` have not been looked at.
+- **End-to-end scoring** covers numeric answers only. True/false, category and text answers (and the `Reconcile` and `Corrected` columns of `train_QA.csv`) aren't scored.

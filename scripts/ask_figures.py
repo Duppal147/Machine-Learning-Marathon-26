@@ -9,8 +9,8 @@ Usage:
 Searches only the figure chunks of documents/chunks/<strategy>.jsonl: BM25 over their text fused with
 dense Qwen retrieval (RRF, as in docs/hybrid_retrieval_design.md). The top --read figures are then sent
 back to the vision model as images together with the question, which is more exact than the reading
-cached at indexing time. --no-dense (or the absence of a Chroma index) makes it BM25-only and offline
-for the search step; the final read always needs the gateway.
+cached at indexing time. --no-dense makes the search BM25-only and offline; the final read always
+needs the gateway. A read that runs out of tokens is retried once at double the budget.
 """
 import argparse
 import os
@@ -19,34 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from wattbot import config, figures
+from wattbot import figures
 from wattbot.chunking import ChunkStore
 from wattbot.embeddings import EmbeddingConfigurationError, create_embedding_client
-from wattbot.hybrid import Bm25Index, rrf_fuse
+from wattbot.figure_qa import FigureSearcher, read_with_retry
 
 CHUNKS_DIR = Path("documents/chunks")
-
-
-def search_figures(question: str, chunks, k: int, strategy: str, dense: bool) -> list:
-    """Rank figure chunks for a question; chunks is the (already filtered) list to search."""
-    rankings = [Bm25Index().fit([c.embed_text for c in chunks]).search([question], max(k, 50))[0]]
-    if dense:
-        from wattbot.vectorstore import ChunkVectorStore
-        store = ChunkVectorStore(strategy)
-        position = {c.chunk_id: i for i, c in enumerate(chunks)}
-        hits = store.search(question, k=max(k, 50), where={"kind": "figure"})
-        rankings.append([position[h.chunk_id] for h in hits if h.chunk_id in position])
-    return [chunks[i] for i in rrf_fuse(rankings, 60, limit=k)]
-
-
-def read_with_retry(client, model: str, question: str, image: Path, context: str, max_tokens: int,
-                    extra_body: dict | None) -> str:
-    """Read one chart; if a reasoning model spends the whole budget thinking, retry once with double."""
-    try:
-        return figures.answer_from_figure(client, model, question, image, context, max_tokens, extra_body)
-    except figures.VisionModelError:
-        print(f"  no answer within {max_tokens} tokens; retrying with {max_tokens * 2}", flush=True)
-        return figures.answer_from_figure(client, model, question, image, context, max_tokens * 2, extra_body)
 
 
 def main():
@@ -67,14 +45,17 @@ def main():
     chunks_path = CHUNKS_DIR / f"{args.strategy}.jsonl"
     if not chunks_path.exists():
         sys.exit(f"error: {chunks_path} not found; run scripts/chunk_docs.py --strategy {args.strategy}")
-    chunks = [c for c in ChunkStore.load(chunks_path)
-              if c.kind == "figure" and (not args.ref_id or c.metadata.get("ref_id") == args.ref_id)]
+    chunks = [c for c in ChunkStore.load(chunks_path) if c.kind == "figure"]
     if not chunks:
         sys.exit("error: no figure chunks; run scripts/describe_figures.py, then scripts/chunk_docs.py "
                  f"--strategy {args.strategy}")
 
     try:
-        top = search_figures(args.question, chunks, args.k, args.strategy, dense=not args.no_dense)
+        store = None
+        if not args.no_dense:
+            from wattbot.vectorstore import ChunkVectorStore
+            store = ChunkVectorStore(args.strategy)
+        top = FigureSearcher(chunks, store).search(args.question, args.k, ref_id=args.ref_id)
         for rank, c in enumerate(top, 1):
             caption = " ".join(c.text.split("\n")[1:2])[:110]
             print(f"{rank:>2}. {c.metadata.get('ref_id', c.doc_id)}  p.{c.pages}  figure_{c.metadata['figure_index']:02d}  {caption}")
@@ -91,7 +72,9 @@ def main():
                 continue
             print(f"\n--- {c.metadata.get('ref_id', c.doc_id)} {image.name} (read with {model}) ---")
             try:
-                print(read_with_retry(client, model, args.question, image, c.text, args.max_tokens, extra_body))
+                print(read_with_retry(client, model, args.question, image, c.text, args.max_tokens, extra_body,
+                                      on_retry=lambda n: print(f"  no answer in the first budget; retrying with {n}",
+                                                               flush=True)))
             except figures.VisionModelError as error:  # one hard chart shouldn't stop the others
                 print(f"error: {error}")
     except (EmbeddingConfigurationError, figures.VisionModelError) as error:

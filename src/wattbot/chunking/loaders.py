@@ -138,9 +138,9 @@ class FigureTextSource(Protocol):
 class DoclingJsonLoader:
     """Loads the dicts written by `DoclingDocument.export_to_dict()` (see parse_pdfs.py).
 
-    By default a picture contributes only its caption (the text Docling reads out of the
-    image is chart labels). Pass `figure_text` to emit each picture as a "figure" block
-    carrying that source's text instead.
+    A picture contributes its caption to the text flow (the text Docling reads out of the image is
+    chart labels). Pass `figure_text` to also emit a separate "figure" block carrying that source's text;
+    the chunkers turn it into an extra chunk without disturbing the text chunks around it.
     """
 
     def __init__(self, figure_text: FigureTextSource | None = None):
@@ -207,16 +207,16 @@ class DoclingJsonLoader:
 
     def _handle_picture(self, item: dict) -> None:
         captions = [self._resolve(cap["$ref"])[1] for cap in item.get("captions", [])]
+        # Text inside a picture is chart labels, so the text flow keeps only the caption, with or without a
+        # figure source: text chunks come out identical to the default loader's.
+        for cap_item in captions:
+            self._emit("caption", cap_item["text"], cap_item)
         caption = "\n".join(c["text"].strip() for c in captions if c["text"].strip())
         body = self.figure_text(self._doc_id, item, self._doc, caption) if self.figure_text else None
-        if body is None:
-            # Text inside a picture is chart labels; without a figure source only the caption is useful.
-            for cap_item in captions:
-                self._emit("caption", cap_item["text"], cap_item)
-            return
-        refs = [item["self_ref"]] + [c["self_ref"] for c in captions]
-        index = int(item["self_ref"].rsplit("/", 1)[1])
-        self._emit("figure", body, item, refs, metadata={"figure_index": index})
+        if body is not None:
+            refs = [item["self_ref"]] + [c["self_ref"] for c in captions]
+            index = int(item["self_ref"].rsplit("/", 1)[1])
+            self._emit("figure", body, item, refs, metadata={"figure_index": index})
 
     def _handle_text(self, item: dict) -> None:
         label, text = item["label"], item["text"]

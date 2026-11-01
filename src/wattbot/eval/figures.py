@@ -11,6 +11,9 @@ chunks of a gold document:
 value_recall is the one that measures "exact details": a caption-only index scores low on it because the
 number lives in the chart, and an index with the chart's data table can score high. A chunk that merely
 repeats the number somewhere unrelated also counts, so read it next to figure_recall.
+
+evaluate_e2e scores the whole path instead: retrieve charts, read them with the vision model, compare the
+number it prints with answer_value (scripts/eval_figures_e2e.py).
 """
 from __future__ import annotations
 
@@ -22,10 +25,11 @@ from pathlib import Path
 import numpy as np
 
 from ..chunking import Chunk
+from ..figure_qa import numbers_in, numbers_match, reply_numbers
+from ..figures import VisionModelError
 from .retrieval import TRAIN_QA, Retriever, _parse_ref_ids
 
 _FIGURE_REF = re.compile(r"\bfig(?:ure)?s?\.?\s*(\d+)", re.IGNORECASE)
-_NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
 
 @dataclass
@@ -39,16 +43,6 @@ class FigureQuestion:
 
 def figure_numbers(text: str) -> set[str]:
     return set(_FIGURE_REF.findall(text))
-
-
-def numbers_in(text: str) -> set[float]:
-    found = set()
-    for match in _NUMBER.findall(text):
-        try:
-            found.add(float(match.replace(",", "")))
-        except ValueError:
-            pass
-    return found
 
 
 def answer_number(answer_value: str, answer_unit: str) -> float | None:
@@ -132,4 +126,76 @@ def evaluate_figures(chunks: list[Chunk], questions: list[FigureQuestion], retri
             summary[f"{metric}_recall@{k}"] = (
                 np.mean([getattr(r, f"{metric}_rank") is not None and getattr(r, f"{metric}_rank") <= k
                          for r in scored]) if scored else float("nan"))
+    return summary, results
+
+
+# ---------------------------------------------------------------------------
+# End to end: retrieve charts, read them, compare the number
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReadResult:
+    rank: int  # 1-based position among the charts read for this question
+    chunk_id: str
+    ref_id: str | None
+    figure_index: int | None
+    reply: str
+    numbers: list[float]  # numbers found in the reply's first line
+    correct: bool         # a number matches the gold answer within tolerance
+    from_gold_doc: bool
+
+
+@dataclass
+class E2EResult:
+    id: str
+    gold: float
+    reads: list[ReadResult] = field(default_factory=list)
+
+    def first_correct(self, strict: bool = True) -> int | None:
+        """Rank of the first read with the right number (and, if strict, from a gold document)."""
+        return next((r.rank for r in self.reads if r.correct and (r.from_gold_doc or not strict)), None)
+
+
+def evaluate_e2e(questions: list[FigureQuestion], retrieve_fn, read_fn, n_reads: int = 3,
+                 tolerance: float = 0.0):
+    """Score the whole chart-question path on the numeric chart questions.
+
+    retrieve_fn(question) -> chunks, best first; the top n_reads are read.
+    read_fn(question, chunk) -> the vision model's reply (may raise VisionModelError or OSError for an
+    unreadable chart; that read then counts as wrong).
+
+    A read is "strict" when it is correct and from a gold document, which rules out the number matching
+    by coincidence in an unrelated chart. Returns (summary dict, per-question results).
+    """
+    scored = [q for q in questions if q.answer_number is not None]
+    results = []
+    for q in scored:
+        result = E2EResult(q.id, q.answer_number)
+        for rank, chunk in enumerate(retrieve_fn(q)[:n_reads], 1):
+            try:
+                reply = read_fn(q, chunk)
+            except (VisionModelError, OSError) as error:
+                reply = f"[error: {error}]"
+            errored = reply.startswith("[error:")
+            result.reads.append(ReadResult(
+                rank=rank, chunk_id=chunk.chunk_id, ref_id=chunk.metadata.get("ref_id"),
+                figure_index=chunk.metadata.get("figure_index"), reply=reply,
+                numbers=[] if errored else reply_numbers(reply),
+                correct=not errored and numbers_match(reply, q.answer_number, tolerance),
+                from_gold_doc=chunk.metadata.get("ref_id") in q.ref_ids))
+        results.append(result)
+
+    def rate(flags: list[bool]) -> float:
+        return float(np.mean(flags)) if flags else float("nan")
+
+    summary = {"questions": len(results), "reads_per_question": n_reads, "tolerance": tolerance,
+               "read_errors": sum(r.reply.startswith("[error:") for res in results for r in res.reads)}
+    for k in sorted({1, n_reads}):
+        summary[f"gold_doc_read@{k}"] = rate([any(r.from_gold_doc for r in res.reads[:k]) for res in results])
+        summary[f"answer@{k}"] = rate([res.first_correct(strict=False) is not None
+                                       and res.first_correct(strict=False) <= k for res in results])
+        summary[f"strict_answer@{k}"] = rate([res.first_correct() is not None
+                                              and res.first_correct() <= k for res in results])
+    summary["wrong_number@1"] = rate([bool(res.reads) and bool(res.reads[0].numbers) and not res.reads[0].correct
+                                      for res in results])
     return summary, results

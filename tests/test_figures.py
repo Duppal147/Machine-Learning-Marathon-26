@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wattbot import figures
-from wattbot.chunking import Chunk, DoclingJsonLoader, HybridChunker, build_pipeline
+from wattbot.chunking import Block, Chunk, DoclingJsonLoader, HybridChunker, build_pipeline
 from wattbot.eval import FigureQuestion, evaluate_figures
 from wattbot.eval.figures import answer_number, figure_numbers, is_caption_of, load_figure_questions, numbers_in
 
@@ -234,7 +234,8 @@ def test_label_source_emits_figure_blocks_only_for_pictures_with_labels(parsed):
     assert figs[0].text == "Figure\nFigure 1: Energy per query.\nText in figure: Alpha; Beta; 7"
     assert figs[0].metadata == {"figure_index": 0} and "#/pictures/0" in figs[0].source_refs
     assert figs[0].page == 2 and figs[0].heading_path == ("1 Intro",)
-    assert any(b.kind == "caption" and b.text == "Figure 2: Our logo." for b in doc.blocks)  # fell back
+    # the text flow is the default loader's: both captions stay, whether or not the picture got a figure block
+    assert [b.text for b in doc.blocks if b.kind == "caption"] == ["Figure 1: Energy per query.", "Figure 2: Our logo."]
 
 
 def test_vlm_source_uses_cached_readings_and_falls_back(parsed, tmp_path):
@@ -249,14 +250,22 @@ def test_vlm_source_uses_cached_readings_and_falls_back(parsed, tmp_path):
     assert any(b.kind == "caption" and b.text == "Figure 2: Our logo." for b in doc.blocks)  # logo -> caption only
 
 
-def test_hybrid_chunker_keeps_a_figure_as_its_own_chunk(parsed):
-    doc = DoclingJsonLoader(figure_text=figures.LabelFigureText()).load(parsed)
-    chunks = HybridChunker().chunk(doc.blocks)
-    # the logo's caption (no figure text) follows the figure chunk as ordinary text, like text after a table
-    assert [c.kind for c in chunks] == ["text", "figure", "text"]
+def test_hybrid_chunker_adds_figure_chunks_without_touching_the_text_chunks(parsed):
+    plain = HybridChunker().chunk(DoclingJsonLoader().load(parsed).blocks)
+    chunks = HybridChunker().chunk(DoclingJsonLoader(figure_text=figures.LabelFigureText()).load(parsed).blocks)
+
+    assert [c.kind for c in chunks] == ["text", "figure"]          # the figure goes after the section's text
+    assert [c.text for c in chunks if c.kind == "text"] == [c.text for c in plain]
     fig = chunks[1]
     assert fig.metadata["figure_index"] == 0 and fig.pages == [2] and "Alpha; Beta; 7" in fig.text
-    assert chunks[2].text == "Figure 2: Our logo."
+
+
+def test_a_figure_between_paragraphs_does_not_split_the_text_chunk():
+    block = lambda kind, text: Block(doc_id="d", kind=kind, text=text, heading_path=("S",), page=1)
+    blocks = [block("text", "First paragraph."), block("figure", "Figure\nbars"), block("text", "Second paragraph.")]
+    chunks = HybridChunker().chunk(blocks)
+    assert [c.kind for c in chunks] == ["text", "figure"]
+    assert chunks[0].text == "First paragraph.\n\nSecond paragraph."  # a table here would have split it in two
 
 
 def test_figure_strategies_are_registered_and_leave_hybrid_unchanged(parsed, monkeypatch, tmp_path):
@@ -265,7 +274,8 @@ def test_figure_strategies_are_registered_and_leave_hybrid_unchanged(parsed, mon
     assert [c.kind for c in plain] == ["text"] and "Figure 1: Energy per query." in plain[0].text
 
     with_labels = build_pipeline("hybrid_figlabels").run([parsed])
-    assert [c.kind for c in with_labels] == ["text", "figure", "text"]
+    assert [c.kind for c in with_labels] == ["text", "figure"]
+    assert with_labels[0].text == plain[0].text and with_labels[0].embed_text == plain[0].embed_text
     assert with_labels[1].chunk_id == "d::hybrid_figlabels::0001"
     assert with_labels[1].embed_text.startswith("d > 1 Intro\n\nFigure")  # heading prefix reaches the embedding
 
@@ -347,3 +357,123 @@ def test_load_figure_questions(tmp_path):
     assert [q.id for q in qs] == ["q1", "q3"]
     assert qs[0].ref_ids == ["wu2021a"] and qs[0].figure_numbers == {"8"} and qs[0].answer_number == 28.5
     assert qs[1].answer_number is None  # boolean answers aren't value-scored
+
+
+# --- searching and reading charts, end to end -----------------------------------------------------
+
+from wattbot.eval import evaluate_e2e
+from wattbot.figure_qa import FigureSearcher, numbers_match, read_with_retry, reply_numbers
+
+
+def _fig(cid, text, ref="paper1", index=0):
+    return Chunk(doc_id=ref, text=text, heading_path=(), pages=[1], kind="figure", source_refs=[], chunk_id=cid,
+                 metadata={"ref_id": ref, "figure_index": index})
+
+
+def test_reply_numbers_ignore_figure_references_and_later_lines():
+    assert reply_numbers("28.5 percent\nRead from Fig. 8, the 2020 bar.") == [28.5]
+    assert reply_numbers("Figure 3: 1,200 MW") == [1200.0]
+    assert reply_numbers("\n\n7.1 and 9 Wh") == [7.1, 9.0]
+    assert reply_numbers("not in figure") == []
+    assert reply_numbers("") == []
+
+
+def test_numbers_match_at_the_gold_answers_precision():
+    assert numbers_match("28.5%", 28.5) and numbers_match("28.54 percent", 28.5)
+    assert not numbers_match("28.4 percent", 28.5) and not numbers_match("27.5 percent", 28.5)
+    assert numbers_match("2007", 2007) and not numbers_match("2008", 2007)  # 1% of a year is not rounding
+    assert numbers_match("4 categories", 4) and not numbers_match("5", 4)
+    assert numbers_match("2.9x", 2.9) and not numbers_match("3", 2.9)
+    assert not numbers_match("no number here", 5)
+    # a relative tolerance is opt-in, for values that can only be estimated off the axis
+    assert numbers_match("29", 28.5, tolerance=0.02) and not numbers_match("29", 28.5)
+
+
+class FakeStore:
+    """Dense side of the search: a fixed ranking, filtered the way Chroma applies `where`."""
+
+    def __init__(self, order, refs):
+        self.order, self.refs, self.wheres = order, refs, []
+
+    def search(self, question, k, where):
+        self.wheres.append(where)
+        wanted = next((c["ref_id"] for c in where.get("$and", []) if "ref_id" in c), None)
+        return [SimpleNamespace(chunk_id=c) for c in self.order if wanted in (None, self.refs[c])][:k]
+
+
+def test_figure_searcher_fuses_bm25_and_dense_and_filters_by_document():
+    chunks = [_fig("a", "energy per query bar chart", "p1"), _fig("b", "water use pie chart", "p2"),
+              _fig("c", "energy footprint reduction", "p2")]
+    assert [c.chunk_id for c in FigureSearcher(chunks).search("energy reduction", 3)] == ["c", "a"]  # BM25 only
+
+    store = FakeStore(["b", "c", "a"], {"a": "p1", "b": "p2", "c": "p2"})
+    fused = FigureSearcher(chunks, store).search("energy reduction", 3)
+    assert fused[0].chunk_id == "c"                      # both rankings agree on it
+    assert store.wheres == [{"kind": "figure"}]
+
+    only_p2 = FigureSearcher(chunks, store).search("energy reduction", 3, ref_id="p2")
+    assert {c.chunk_id for c in only_p2} <= {"b", "c"} and "a" not in [c.chunk_id for c in only_p2]
+    assert store.wheres[-1] == {"$and": [{"kind": "figure"}, {"ref_id": "p2"}]}
+
+
+def test_read_with_retry_doubles_the_budget_once(tmp_path):
+    from test_figures import FakeVision  # noqa: F401  (same module; keeps the helper visible here)
+    image = _png(tmp_path / "f.png")
+
+    class Budget:
+        def __init__(self, enough):
+            self.enough, self.budgets = enough, []
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kw):
+            self.budgets.append(kw["max_tokens"])
+            ok = kw["max_tokens"] >= self.enough
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="28.5%" if ok else None, reasoning_content="x" * 99),
+                finish_reason="stop" if ok else "length")])
+
+    retried = []
+    client = Budget(16000)
+    assert read_with_retry(client, "m", "q", image, "ctx", 8000, None, on_retry=retried.append) == "28.5%"
+    assert client.budgets == [8000, 16000] and retried == [16000]
+
+    client = Budget(0)
+    assert read_with_retry(client, "m", "q", image, "ctx", 8000, None) == "28.5%" and client.budgets == [8000]
+
+    with pytest.raises(figures.VisionModelError):
+        read_with_retry(Budget(10**9), "m", "q", image, "ctx", 8000, None)
+
+
+def test_evaluate_e2e_scores_numbers_and_separates_coincidences():
+    chunks = {"right": _fig("right", "Fig. 8 reduction", "wu", 7), "near": _fig("near", "Fig. 6 average", "wu", 5),
+              "other": _fig("other", "someone else's chart", "zz", 1), "broken": _fig("broken", "x", "wu", 9)}
+    questions = [
+        FigureQuestion("q1", "How much did energy fall?", ["wu"], {"8"}, 28.5),
+        FigureQuestion("q2", "Which year?", ["wu"], set(), 2007.0),
+        FigureQuestion("q3", "True or false?", ["wu"], set(), None),   # not numeric: not scored
+    ]
+    order = {"q1": ["near", "right", "other"], "q2": ["other", "broken", "near"]}
+    replies = {("q1", "near"): "20 percent\nFig. 6 shows the average.", ("q1", "right"): "28.5 percent\nFig. 8.",
+               ("q1", "other"): "28.5\nsomewhere else", ("q2", "other"): "2007", ("q2", "near"): "2008"}
+
+    def read(q, chunk):
+        if (q.id, chunk.chunk_id) not in replies:
+            raise figures.VisionModelError("no usable reply")
+        return replies[(q.id, chunk.chunk_id)]
+
+    summary, results = evaluate_e2e(questions, lambda q: [chunks[c] for c in order[q.id]], read, n_reads=3)
+
+    assert [r.id for r in results] == ["q1", "q2"] and summary["questions"] == 2
+    q1, q2 = results
+    assert [r.correct for r in q1.reads] == [False, True, True]
+    assert q1.reads[0].numbers == [20.0] and q1.first_correct() == 2
+    assert [r.from_gold_doc for r in q1.reads] == [True, True, False]
+    assert q2.reads[0].correct and not q2.reads[0].from_gold_doc        # right number, wrong document
+    assert q2.first_correct(strict=False) == 1 and q2.first_correct() is None
+    assert q2.reads[1].reply.startswith("[error:") and q2.reads[1].numbers == []
+
+    assert summary["read_errors"] == 1
+    assert summary["answer@1"] == 0.5 and summary["answer@3"] == 1.0           # q2's coincidence counts here
+    assert summary["strict_answer@1"] == 0 and summary["strict_answer@3"] == 0.5
+    assert summary["wrong_number@1"] == 0.5                                    # q1's first read said 20
+    assert summary["gold_doc_read@1"] == 0.5 and summary["gold_doc_read@3"] == 1.0
