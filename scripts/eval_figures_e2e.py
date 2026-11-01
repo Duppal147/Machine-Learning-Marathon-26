@@ -43,6 +43,7 @@ from wattbot import figures
 from wattbot.chunking import ChunkStore
 from wattbot.embeddings import CachedEmbedder, EmbeddingConfigurationError, create_embedding_client
 from wattbot.eval import evaluate_e2e, load_figure_questions
+from wattbot.eval.summary import save_summary
 from wattbot.figure_qa import FigureSearcher, read_with_retry
 
 CHUNKS_DIR = Path("documents/chunks")
@@ -192,6 +193,9 @@ def main():
     for key in metrics:
         print(f"  {key:<18}" + "".join(f"{summaries[name][key]:>10.3f}" for name in args.prompt))
     print(f"  {'read errors':<18}" + "".join(f"{summaries[name]['read_errors']:>10}" for name in args.prompt))
+    save_summary(EVAL_OUT / f"summary__e2e__{args.strategy}{'__oracle' if args.oracle_doc else ''}.json", "e2e",
+                 {"strategy": args.strategy, "oracle_doc": args.oracle_doc, "reads": n, "tolerance": args.tolerance,
+                  "model": model, "dense": not args.no_dense, "prompts": summaries})
 
 
 if __name__ == "__main__":

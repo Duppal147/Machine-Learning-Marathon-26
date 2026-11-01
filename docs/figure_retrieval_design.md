@@ -100,6 +100,18 @@ uv run python scripts/publish_index.py --upload     # includes figure_text and t
 
 Inspect `documents/figure_text/<doc>/figure_NN.json` next to `documents/figures/<doc>/figure_NN.png` for a few charts before running everything: the data table is only as good as the model's reading.
 
+### Writing the pull request description
+
+`scripts/make_pr_body.py` writes `pr_body.md` from measured results, so no number is typed by hand. The three eval scripts save a summary (`documents/eval/summary__*.json`) stamped with the commit that produced it; the generator reads those, counts the readings and figure chunks, checks that `hybrid_fig`'s text chunks are identical to `hybrid`'s, lists the shared files in the diff, and runs the tests. A result that is missing, from another commit, or from uncommitted changes is flagged in the text and listed at the end (`--strict` exits non-zero).
+
+```bash
+git status --short                    # commit first, so results are stamped with the commit being proposed
+uv run --with pytest python scripts/make_pr_body.py --run     # runs chunking, indexing and the evals, then writes pr_body.md
+gh pr create --base main --head <branch> --title "feat: chart reading and figure chunks for retrieval" --body-file pr_body.md
+```
+
+Without `--run` it only reads existing results. The manual checks (vision-model check, spot-checking readings, a non-author approval) stay as unticked boxes. Don't commit `pr_body.md`.
+
 ## 6. Known limits and next steps
 
 - **Reading quality is unmeasured.** The offline tests use a fake client. The first real run should spot-check 10–20 charts, including a dense multi-series line chart, a stacked bar, and a small-print one, and compare the extracted table with the image.

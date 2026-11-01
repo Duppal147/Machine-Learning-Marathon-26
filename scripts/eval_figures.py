@@ -26,6 +26,7 @@ from wattbot.chunking import REGISTRY, build_pipeline
 from wattbot.embeddings import EmbeddingConfigurationError
 from wattbot.eval import BM25Retriever, ChromaRetriever, FusionRetriever, TfidfRetriever, evaluate_figures
 from wattbot.eval import load_figure_questions
+from wattbot.eval.summary import save_summary
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
@@ -80,6 +81,9 @@ def main():
     for strategy, summary in rows:
         print(f"{strategy:<18}" + "".join(f"{summary[c]:>17.3f}" if c != "figure_chunks" else f"{summary[c]:>17}"
                                           for c in COLUMNS))
+    name = s["retriever"].replace(":", "_").replace("/", "_")
+    save_summary(EVAL_OUT / f"summary__figures__{name}.json", "figures",
+                 {"retriever": s["retriever"], "strategies": dict(rows)})
 
 
 if __name__ == "__main__":
