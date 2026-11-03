@@ -28,6 +28,7 @@ from wattbot.chunking import REGISTRY, build_pipeline
 from wattbot.embeddings import EmbeddingConfigurationError
 from wattbot.eval import (BM25Retriever, ChromaRetriever, FusionRetriever, TfidfRetriever, evaluate,
                           load_questions)
+from wattbot.eval.summary import save_summary
 
 PARSED_DIR = Path("documents/parsed_json")
 EVAL_OUT = Path("documents/eval")
@@ -90,6 +91,10 @@ def main():
         print(f"{strategy:<12}{s['chunks']:>7}" + "".join(
             f"{s[c]:>19.0f}" if c.startswith("ctx") else f"{s[c]:>19.3f}" for c in COLUMNS))
     print(f"\nper-question results -> {EVAL_OUT}/")
+    name = first["retriever"].replace(":", "_").replace("/", "_")
+    save_summary(EVAL_OUT / f"summary__retrieval__{name}.json", "retrieval",
+                 {"retriever": first["retriever"], "questions": first["questions"],
+                  "passage_questions": first["passage_questions"], "strategies": dict(rows)})
 
 
 if __name__ == "__main__":

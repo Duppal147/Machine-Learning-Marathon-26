@@ -48,6 +48,12 @@ def _make_project(root: Path) -> None:
     meta.parent.mkdir(parents=True)
     meta.write_text("id,local_path\nref2024,documents/pdfs/doc1.pdf\n")
 
+    readings = root / "documents/figure_text/doc1"
+    readings.mkdir(parents=True)
+    (readings / "figure_00.json").write_text(json.dumps({"result": {"kind": "bar_chart", "summary": "s"}}))
+    (readings / "figure_01.json").write_text(json.dumps({"result": {"kind": "logo"}}))
+    (readings / "figure_02.json.tmp").write_text("half written")  # an interrupted describe_figures run
+
 
 def test_build_and_install_round_trip(tmp_path):
     src, dst = tmp_path / "src", tmp_path / "dst"
@@ -55,11 +61,13 @@ def test_build_and_install_round_trip(tmp_path):
     archive = tmp_path / "snap.tar.gz"
 
     manifest = build_snapshot(archive, root=src)
-    assert set(manifest["parts"]) == {"parsed_json", "chunks", "chroma", "metadata"}
+    assert set(manifest["parts"]) == {"parsed_json", "chunks", "figure_text", "chroma", "metadata"}
     assert manifest["parts"]["chunks"] == {"hybrid.jsonl": 1}
+    assert manifest["parts"]["figure_text"] == {"readings": 2}  # the .tmp leftover is not a reading
     assert manifest["parts"]["chroma"]["collections"] == {"hybrid__fake": 1}
     assert read_manifest(archive) == manifest
     assert "1 documents (figure images stripped)" in describe(manifest)
+    assert "figure_text: 2 chart readings" in describe(manifest)
 
     install_snapshot(archive, root=dst, expected_sha256=sha256_file(archive))
 
@@ -68,8 +76,9 @@ def test_build_and_install_round_trip(tmp_path):
     assert DoclingJsonLoader().load(dst / "documents/parsed_json/doc1.json").blocks  # still loads
     assert ChunkStore.load(dst / "documents/chunks/hybrid.jsonl").get("doc1::hybrid::0000")
     assert (dst / "WattBot2026/metadata_downloaded.csv").exists()
+    assert sorted(p.name for p in (dst / "documents/figure_text/doc1").iterdir()) == ["figure_00.json", "figure_01.json"]
 
-    store = ChunkVectorStore("hybrid", path=dst / "documents/chroma", model="fake", embed_fn=_embed)
+    store =ChunkVectorStore("hybrid", path=dst / "documents/chroma", model="fake", embed_fn=_embed)
     assert store.count() == 1
     assert store.search("water", k=1, instruction=None)[0].metadata["ref_id"] == "ref2024"
 
@@ -79,6 +88,9 @@ def test_empty_chroma_and_missing_parts_are_skipped(tmp_path):
     (root / "documents/chunks").mkdir(parents=True)
     ChunkStore([]).save(root / "documents/chunks/hybrid.jsonl")
     ChunkVectorStore("hybrid", path=root / "documents/chroma", model="fake", embed_fn=_embed)  # empty
+    leftovers = root / "documents/figure_text/doc1"
+    leftovers.mkdir(parents=True)
+    (leftovers / "figure_00.json.tmp").write_text("half written")  # no finished reading: not worth shipping
 
     manifest = build_snapshot(tmp_path / "s.tar.gz", root=root)
     assert set(manifest["parts"]) == {"chunks"}

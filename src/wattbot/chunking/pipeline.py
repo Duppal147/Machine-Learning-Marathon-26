@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from ..figures import LabelFigureText, VlmFigureText
 from .chunkers import Chunker, FixedSizeChunker, HybridChunker, SectionChunker
 from .enrichers import CorpusMetadataEnricher, Enricher, HeadingPrefixEnricher
 from .filters import BlockFilter, ChunkFilter, DropSections, MinTokens
@@ -66,6 +67,17 @@ REGISTRY: dict[str, Callable[..., ChunkingPipeline]] = {
     # same chunks, no heading prefix: A/B the enrichment on its own
     "hybrid_raw": lambda max_tokens=400: ChunkingPipeline(
         "hybrid_raw", HybridChunker(max_tokens=max_tokens), **_defaults(heading_prefix=False)),
+    # `hybrid` plus one "figure" chunk per chart, from the vision-model readings written by
+    # scripts/describe_figures.py (pictures without a reading keep just their caption)
+    "hybrid_fig": lambda max_tokens=400: ChunkingPipeline(
+        "hybrid_fig", HybridChunker(max_tokens=max_tokens),
+        loader=AutoLoader({".json": DoclingJsonLoader(figure_text=VlmFigureText())}),
+        **_defaults(heading_prefix=True)),
+    # `hybrid` plus figure chunks built only from the labels in the PDF text layer: the no-model baseline
+    "hybrid_figlabels": lambda max_tokens=400: ChunkingPipeline(
+        "hybrid_figlabels", HybridChunker(max_tokens=max_tokens),
+        loader=AutoLoader({".json": DoclingJsonLoader(figure_text=LabelFigureText())}),
+        **_defaults(heading_prefix=True)),
     "section": lambda max_tokens=1200: ChunkingPipeline(
         "section", SectionChunker(max_tokens=max_tokens), **_defaults(heading_prefix=True)),
     "fixed": lambda max_tokens=300: ChunkingPipeline(

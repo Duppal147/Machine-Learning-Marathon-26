@@ -4,6 +4,7 @@ A snapshot is one .tar.gz holding what is slow or costly to rebuild:
 
     documents/parsed_json/   Docling output (hours of parsing), embedded figure images stripped
     documents/chunks/        chunk JSONL files
+    documents/figure_text/   vision-model readings of the charts (an hour of gateway calls), JSON per figure
     documents/chroma/        the ChromaDB index (gateway embedding calls)
     WattBot2026/metadata_downloaded.csv   file stem -> ref_id mapping used when re-chunking
     manifest.json            what's inside, and the chromadb version / embedding model that wrote it
@@ -29,6 +30,7 @@ from . import config
 PARTS = {
     "parsed_json": Path("documents/parsed_json"),
     "chunks": Path("documents/chunks"),
+    "figure_text": Path("documents/figure_text"),
     "chroma": Path(config.CHROMA_DIR),
     "metadata": Path("WattBot2026/metadata_downloaded.csv"),
 }
@@ -118,6 +120,11 @@ def build_snapshot(out_path: Path, root: Path = Path("."), parts: list[str] | No
         elif name == "chunks":
             manifest["parts"][name] = {
                 f.name: sum(1 for line in open(f) if line.strip()) for f in sorted(path.glob("*.jsonl"))}
+        elif name == "figure_text":
+            readings = len(list(path.glob("*/figure_*.json")))
+            if not readings:
+                continue  # only half-written leftovers
+            manifest["parts"][name] = {"readings": readings}
         elif name == "chroma":
             counts = _chroma_counts(path)
             if not any(counts.values()):
@@ -141,7 +148,8 @@ def build_snapshot(out_path: Path, root: Path = Path("."), parts: list[str] | No
                     _add_bytes(tar, f"{PARTS[name].as_posix()}/{f.name}", json.dumps(doc).encode())
             else:
                 tar.add(path, arcname=PARTS[name].as_posix(),
-                        filter=lambda info: None if "__pycache__" in info.name else info)
+                        filter=lambda info: None if "__pycache__" in info.name or info.name.endswith(".tmp")
+                        else info)
     return manifest
 
 
@@ -200,6 +208,8 @@ def describe(manifest: dict) -> str:
                      + (" (figure images stripped)" if manifest.get("images_stripped") else ""))
     if "chunks" in parts:
         lines.append("chunks: " + ", ".join(f"{k} ({v} chunks)" for k, v in parts["chunks"].items()))
+    if "figure_text" in parts:
+        lines.append(f"figure_text: {parts['figure_text']['readings']} chart readings")
     if "chroma" in parts:
         lines.append("chroma: " + ", ".join(f"{k} ({v} vectors)" for k, v in parts["chroma"]["collections"].items()))
     if "metadata" in parts:

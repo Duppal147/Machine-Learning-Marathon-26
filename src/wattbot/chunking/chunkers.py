@@ -13,6 +13,7 @@ from .models import Block, Chunk
 
 LenFn = Callable[[str], int]
 TOKENS_PER_WORD = 1.3
+ATOMIC_KINDS = ("table", "figure")  # kept whole, as their own chunk, even if over budget
 
 
 def approx_tokens(text: str) -> int:
@@ -34,9 +35,9 @@ def blocks_to_chunk(blocks: list[Block], **metadata) -> Chunk:
         text="".join(parts),
         heading_path=blocks[0].heading_path,
         pages=sorted({b.page for b in blocks if b.page is not None}),
-        kind="table" if all(b.kind == "table" for b in blocks) else "text",
+        kind=next((k for k in ATOMIC_KINDS if all(b.kind == k for b in blocks)), "text"),
         source_refs=[ref for b in blocks for ref in b.source_refs],
-        metadata=metadata,
+        metadata={**{k: v for b in blocks for k, v in b.metadata.items()}, **metadata},
     )
 
 
@@ -73,6 +74,7 @@ class HybridChunker:
     - never crosses a section (heading_path) boundary
     - splits oversized paragraphs on sentence boundaries
     - tables become their own chunk (kept whole, even if over budget)
+    - figure blocks become extra chunks placed after the section's text, so they never split the text chunks
     - a tiny trailing chunk is merged into its predecessor
     """
 
@@ -92,7 +94,7 @@ class HybridChunker:
     def _explode(self, blocks: list[Block]) -> list[Block]:
         out = []
         for b in blocks:
-            if b.kind == "table" or self.len_fn(b.text) <= self.max_tokens:
+            if b.kind in ATOMIC_KINDS or self.len_fn(b.text) <= self.max_tokens:
                 out.append(b)
             else:
                 out += [replace(b, text=piece) for piece in split_text(b.text, self.max_tokens, self.len_fn)]
@@ -100,6 +102,7 @@ class HybridChunker:
 
     def _pack_section(self, blocks: list[Block]) -> list[list[Block]]:
         groups: list[list[Block]] = []
+        figure_groups: list[list[Block]] = []
         current: list[Block] = []
         current_len = 0
 
@@ -110,6 +113,9 @@ class HybridChunker:
             current, current_len = [], 0
 
         for b in self._explode(blocks):
+            if b.kind == "figure" and self.tables_separate:
+                figure_groups.append([b])  # extra chunk: the surrounding text keeps packing as without it
+                continue
             if b.kind == "table" and self.tables_separate:
                 flush()
                 groups.append([b])
@@ -121,17 +127,17 @@ class HybridChunker:
             current_len += n
         flush()
 
-        if len(groups) >= 2 and not self._is_table(groups[-1]) and not self._is_table(groups[-2]):
+        if len(groups) >= 2 and not self._is_atomic(groups[-1]) and not self._is_atomic(groups[-2]):
             tail, prev = self._len(groups[-1]), self._len(groups[-2])
             if tail < self.min_tokens and tail + prev <= self.max_tokens + self.min_tokens:
                 groups[-2:] = [groups[-2] + groups[-1]]
-        return groups
+        return groups + figure_groups
 
     def _len(self, group: list[Block]) -> int:
         return sum(self.len_fn(b.text) for b in group)
 
-    def _is_table(self, group: list[Block]) -> bool:
-        return self.tables_separate and group[0].kind == "table"
+    def _is_atomic(self, group: list[Block]) -> bool:
+        return self.tables_separate and group[0].kind in ATOMIC_KINDS
 
 
 class SectionChunker(HybridChunker):

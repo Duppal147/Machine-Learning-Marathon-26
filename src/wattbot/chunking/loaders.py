@@ -126,8 +126,25 @@ def table_to_markdown(grid: list[list[dict]]) -> str:
     return "\n".join(lines)
 
 
+class FigureTextSource(Protocol):
+    """Supplies the searchable text for one picture (see wattbot.figures).
+
+    Returns None to leave the picture as before: only its caption is kept.
+    """
+
+    def __call__(self, doc_id: str, picture: dict, doc: dict, caption: str) -> str | None: ...
+
+
 class DoclingJsonLoader:
-    """Loads the dicts written by `DoclingDocument.export_to_dict()` (see parse_pdfs.py)."""
+    """Loads the dicts written by `DoclingDocument.export_to_dict()` (see parse_pdfs.py).
+
+    A picture contributes its caption to the text flow (the text Docling reads out of the image is
+    chart labels). Pass `figure_text` to also emit a separate "figure" block carrying that source's text;
+    the chunkers turn it into an extra chunk without disturbing the text chunks around it.
+    """
+
+    def __init__(self, figure_text: FigureTextSource | None = None):
+        self.figure_text = figure_text
 
     def load(self, path: Path) -> Document:
         path = Path(path)
@@ -156,7 +173,8 @@ class DoclingJsonLoader:
         prov = item.get("prov") or []
         return prov[0]["page_no"] if prov else None
 
-    def _emit(self, kind: str, text: str, item: dict, refs: list[str] | None = None) -> None:
+    def _emit(self, kind: str, text: str, item: dict, refs: list[str] | None = None,
+              metadata: dict | None = None) -> None:
         text = text.strip()
         if not text:
             return
@@ -167,6 +185,7 @@ class DoclingJsonLoader:
             heading_path=self._headings.path,
             page=self._page(item),
             source_refs=refs or [item["self_ref"]],
+            metadata=metadata or {},
         ))
 
     def _walk(self, ref: str) -> None:
@@ -184,10 +203,20 @@ class DoclingJsonLoader:
         elif collection == "tables":
             self._handle_table(item)
         elif collection == "pictures":
-            # Text inside a picture is OCR'd chart labels; only the caption is useful.
-            for cap in item.get("captions", []):
-                _, cap_item = self._resolve(cap["$ref"])
-                self._emit("caption", cap_item["text"], cap_item)
+            self._handle_picture(item)
+
+    def _handle_picture(self, item: dict) -> None:
+        captions = [self._resolve(cap["$ref"])[1] for cap in item.get("captions", [])]
+        # Text inside a picture is chart labels, so the text flow keeps only the caption, with or without a
+        # figure source: text chunks come out identical to the default loader's.
+        for cap_item in captions:
+            self._emit("caption", cap_item["text"], cap_item)
+        caption = "\n".join(c["text"].strip() for c in captions if c["text"].strip())
+        body = self.figure_text(self._doc_id, item, self._doc, caption) if self.figure_text else None
+        if body is not None:
+            refs = [item["self_ref"]] + [c["self_ref"] for c in captions]
+            index = int(item["self_ref"].rsplit("/", 1)[1])
+            self._emit("figure", body, item, refs, metadata={"figure_index": index})
 
     def _handle_text(self, item: dict) -> None:
         label, text = item["label"], item["text"]

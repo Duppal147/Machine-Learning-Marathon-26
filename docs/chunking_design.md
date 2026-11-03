@@ -339,7 +339,7 @@ An `LLMContextEnricher` would ask the chat model (the Qwen gateway, see `test_qw
 - Add the paragraph that references the table ("as shown in Table 3 …") to its metadata.
 
 ### 7.6 Figures
-Many WattBot answers come from charts. `scripts/parse_pdfs.py` already saves figure images to `documents/figures/<doc_id>/`. A vision model could write a figure description to emit as a `figure` chunk with its caption, page and image path.
+Many WattBot answers come from charts. `scripts/parse_pdfs.py` already saves figure images to `documents/figures/<doc_id>/`. First pass implemented (the `hybrid_figlabels` and `hybrid_fig` strategies, a `figure` block and chunk kind): see [figure_retrieval_design.md](figure_retrieval_design.md). Open: multi-panel splitting and an end-to-end numeric check.
 
 ### 7.7 Retrieval-side structure
 - **Small-to-big / parent retrieval:** retrieve on small chunks, then send the parent section (or `neighbors`) to the LLM.

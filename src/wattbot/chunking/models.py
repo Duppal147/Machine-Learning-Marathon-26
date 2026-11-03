@@ -6,7 +6,7 @@ downstream of a loader should know which file format the document came from.
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-BlockKind = Literal["text", "list_item", "table", "caption", "formula", "code"]
+BlockKind = Literal["text", "list_item", "table", "caption", "formula", "code", "figure"]
 
 
 @dataclass
@@ -19,6 +19,7 @@ class Block:
     heading_path: tuple[str, ...]  # section headings above this block, outermost first (excludes doc title)
     page: int | None = None
     source_refs: list[str] = field(default_factory=list)  # e.g. Docling self_refs like "#/texts/42"
+    metadata: dict = field(default_factory=dict)  # copied onto the chunk, e.g. figure_index for "figure" blocks
 
 
 @dataclass
@@ -41,7 +42,7 @@ class Chunk:
     text: str
     heading_path: tuple[str, ...]
     pages: list[int]
-    kind: str  # "text" or "table"
+    kind: str  # "text", "table" or "figure"
     source_refs: list[str]
     embed_text: str = ""
     chunk_id: str = ""  # assigned by the pipeline once the final chunk order is known
