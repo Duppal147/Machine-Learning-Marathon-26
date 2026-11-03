@@ -15,6 +15,8 @@ EMBEDDING_DIM = 4096
 # Vision-language chat model that reads chart images (scripts/describe_figures.py). Empty means
 # "pick the gateway's only Qwen-VL chat model"; run scripts/check_vision_model.py to see what is served.
 VISION_MODEL = os.environ.get("VISION_MODEL", "")
+# Explicitly choose a chat/instruct model available on your gateway; no model is assumed.
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "")
 
 # Vector store (under the gitignored documents/ folder)
 CHROMA_DIR = os.environ.get("CHROMA_DIR", "documents/chroma")
