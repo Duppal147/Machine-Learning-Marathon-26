@@ -12,6 +12,9 @@ REQUEST_TIMEOUT = 300  # first call after a cold start can take ~90s
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "qwen3-vl-embedding-8b")
 EMBEDDING_DIM = 4096
 
+# Explicitly choose a chat/instruct model available on your gateway; no model is assumed.
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "")
+
 # Vector store (under the gitignored documents/ folder)
 CHROMA_DIR = os.environ.get("CHROMA_DIR", "documents/chroma")
 

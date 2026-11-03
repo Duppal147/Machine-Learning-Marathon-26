@@ -1,6 +1,12 @@
 # Machine-Learning-Marathon-26
 RAGGEDY AMP
 
+## Answer generation
+
+Generate validated answer CSVs with progress, checkpoints and resume support:
+see [docs/answer_generation.md](docs/answer_generation.md) for setup, training smoke
+tests, official scoring and preparing a test submission.
+
 ## BadgerBrain gateway setup
 
 The embedding and chat models are served by the UW-Madison BadgerBrain gateway
