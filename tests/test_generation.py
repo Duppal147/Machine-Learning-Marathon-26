@@ -491,3 +491,42 @@ def test_followup_prompt_only_sees_the_question_and_explanation(question):
     args = client.chat.completions.create.call_args.kwargs
     assert json.loads(args["messages"][1]["content"]) == {"question": question["question"], "explanation": "missing"}
     assert args["temperature"] == 0 and "SECRET_GOLD" not in json.dumps(args)
+
+
+def table_chunk(chunk_id, doc_id, label):
+    return Chunk(doc_id, f"{label}: results\n\n| a | b |\n| --- | --- |\n| 1 | 2 |", (), [1], "table", [],
+                 chunk_id=chunk_id, metadata={"ref_id": "r", "url": "https://example.org/r.pdf"})
+
+
+def prose_chunk(chunk_id, doc_id, text):
+    return Chunk(doc_id, text, (), [1], "text", [], chunk_id=chunk_id,
+                 metadata={"ref_id": "r", "url": "https://example.org/r.pdf"})
+
+
+def test_a_mentioned_table_is_added_from_the_same_document_only():
+    wanted, elsewhere = table_chunk("t1", "doc", "TABLE III"), table_chunk("t2", "other", "Table III")
+    prose = prose_chunk("p1", "doc", "We report the maximum batch size in Table III.")
+    assert generation.referenced_tables([prose], [prose, elsewhere, wanted], 3) == [wanted]
+
+
+def test_table_expansion_skips_present_tables_prose_and_respects_the_limit():
+    first, second = table_chunk("t1", "doc", "Table 1"), table_chunk("t2", "doc", "Table 2")
+    prose = prose_chunk("p1", "doc", "See Table 1, Table 2 and Table 2 again.")
+    uncaptioned = prose_chunk("p2", "doc", "Table 2 shows the trend without any grid.")
+    pool = [prose, uncaptioned, first, second]
+    assert generation.referenced_tables([prose], pool, 1) == [first]
+    assert generation.referenced_tables([prose, first], pool, 5) == [second]
+    assert generation.referenced_tables([prose_chunk("p3", "doc", "No reference.")], pool, 5) == []
+
+
+def test_run_sends_mentioned_tables_to_the_model(tmp_path, question, payload):
+    prose = prose_chunk("c1", "doc", "GPT-3 training used 1,287 MWh, see Table 4.")
+    table = table_chunk("t4", "doc", "Table 4")
+    payload["evidence"] = [{"chunk_id": "c1", "quote": "GPT-3 training used 1,287 MWh"}]
+    def generate(q, context):
+        assert [c.chunk_id for c in context] == ["c1", "t4"]
+        return validate_answer(q, json.dumps(payload), context), json.dumps(payload)
+    settings = {"top_k": 1, "questions": [question], "expand_tables": 2}
+    code = runner.run_questions([question], [prose, table], RankedRetriever([0]), generate, tmp_path, settings)
+    assert code == 0
+    assert json.loads(next((tmp_path / "answers").glob("*.json")).read_text())["passage_ids"] == ["c1", "t4"]

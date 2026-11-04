@@ -38,6 +38,8 @@ invent values. Return one JSON object: {"queries": ["..."]}, without Markdown.""
 
 
 _THOUSANDS = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_TABLE_LABEL = re.compile(r"\W*table\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
+_TABLE_MENTION = re.compile(r"\b(?:table|tab\.)\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
 
 
 class GenerationValidationError(ValueError):
@@ -63,6 +65,23 @@ def load_input_questions(path: Path) -> list[dict[str, str]]:
 def passage_context(passages: list[Chunk]) -> list[dict]:
     return [{"chunk_id": c.chunk_id, "ref_id": c.metadata.get("ref_id"),
              "title": c.metadata.get("title"), "pages": c.pages, "text": c.text} for c in passages]
+
+
+def referenced_tables(passages: list[Chunk], chunks: list[Chunk], limit: int) -> list[Chunk]:
+    """Return tables the passages mention. A short table chunk ranks below the prose citing it."""
+    tables: dict[tuple[str, str], list[Chunk]] = {}
+    for chunk in chunks:
+        label = _TABLE_LABEL.match(chunk.text[:80])
+        if label and "|" in chunk.text:
+            tables.setdefault((chunk.doc_id, label.group(1).upper()), []).append(chunk)
+    seen, added = {c.chunk_id for c in passages}, []
+    for passage in passages:
+        for mention in _TABLE_MENTION.finditer(passage.text):
+            for table in tables.get((passage.doc_id, mention.group(1).upper()), []):
+                if table.chunk_id not in seen and len(added) < limit:
+                    seen.add(table.chunk_id)
+                    added.append(table)
+    return added
 
 
 def validate_answer(question: dict, raw_response: str, passages: list[Chunk]) -> dict[str, str]:

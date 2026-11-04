@@ -143,6 +143,15 @@ Private test labels remain hidden. Checkpoints, splits, CSVs and receipts stay i
 the ignored local `documents/runs/` directory; no downloaded competition data or
 generated outputs are included in the source change.
 
+## Table expansion
+
+A short table chunk often ranks below the prose that cites it. `--expand-tables N` adds
+up to N tables that the retrieved passages mention by label ("Table III") from the same
+paper, after the first retrieval only. On the 122 training questions it can affect, on
+the pinned corpus, `--expand-tables 3` moved 112 correct values to 116, with none lost.
+That full-train result of 0.918 used all 245 questions for development, so treat it as
+optimistic.
+
 ## Offline verification
 
 ```bash

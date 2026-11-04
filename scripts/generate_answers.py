@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from wattbot import config
 from wattbot.chunking import ChunkStore
 from wattbot.embeddings import create_embedding_client
-from wattbot.generation import (COLUMNS, FOLLOWUP_PROMPT, SYSTEM_PROMPT, followup_queries, GenerationValidationError, generate_answer, load_input_questions,
+from wattbot.generation import (COLUMNS, FOLLOWUP_PROMPT, SYSTEM_PROMPT, followup_queries, GenerationValidationError, generate_answer, load_input_questions, referenced_tables,
                                 passage_context, validate_answer, validate_predictions)
 
 
@@ -167,6 +167,8 @@ def run_questions(questions, chunks, retriever, generate, run_dir, settings, *, 
                 if len(ranked) != 1:
                     raise ValueError("retriever returned the wrong number of query results")
                 context = [chunks[index] for index in ranked[0]]
+                if settings.get("expand_tables"):
+                    context = context + referenced_tables(context, chunks, settings["expand_tables"])
                 row, raw = generate(question, context)
                 followup_record = None
                 if followup is not None and row["answer_value"] == "is_blank":
@@ -248,6 +250,8 @@ def main(argv=None):
     parser.add_argument("--followup-queries", type=int, choices=(0, 1, 2, 3), default=0,
                         help="after an abstention, search this many missing facts and re-ask (default: off)")
     parser.add_argument("--followup-k", type=positive, default=5, help="passages each follow-up query adds at most")
+    parser.add_argument("--expand-tables", type=int, choices=(0, 1, 2, 3, 4, 5), default=0,
+                        help="add up to this many tables that the retrieved passages mention (default: off)")
     parser.add_argument("--no-query-instruction", action="store_true")
     parser.add_argument("--limit", type=positive)
     parser.add_argument("--resume", action="store_true")
@@ -277,6 +281,7 @@ def main(argv=None):
                 "max_output_tokens": args.max_output_tokens, "length_retries": args.length_retries,
                 "validation_retries": args.validation_retries, "retriever": args.retriever,
                 "followup_queries": args.followup_queries, "followup_k": args.followup_k,
+                "expand_tables": args.expand_tables,
                 "followup_prompt_sha256": fingerprint(FOLLOWUP_PROMPT),
                 "strategy": args.strategy, "embedding_model": config.EMBEDDING_MODEL,
                 "query_instruction": None if args.no_query_instruction else config.QUERY_INSTRUCTION,
