@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import re
+from decimal import Decimal
 from pathlib import Path
 
 from .chunking import Chunk
@@ -38,6 +39,7 @@ invent values. Return one JSON object: {"queries": ["..."]}, without Markdown.""
 
 
 _THOUSANDS = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_CALCULATOR_OUTPUT = re.compile(r"-?\d+\.\d{7,}")
 _TABLE_LABEL = re.compile(r"\W*table\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
 _TABLE_MENTION = re.compile(r"\b(?:table|tab\.)\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
 
@@ -106,6 +108,10 @@ def validate_answer(question: dict, raw_response: str, passages: list[Chunk]) ->
     if _THOUSANDS.fullmatch(row["answer_value"]):
         # The scorer parses numbers with float(), which rejects "100,000".
         row["answer_value"] = row["answer_value"].replace(",", "")
+    if _CALCULATOR_OUTPUT.fullmatch(row["answer_value"]) and sum(
+            c.isdigit() for c in row["answer_value"].lstrip("-0.")) >= 7:
+        # No paper prints 1.3333333; a division reported at full precision misses a 3-figure gold.
+        row["answer_value"] = format(Decimal(f"{float(row['answer_value']):.3g}").normalize(), "f")
     if row["answer_value"] == "is_blank":
         if evidence:
             raise GenerationValidationError("an abstention must have empty evidence")

@@ -378,6 +378,15 @@ def test_thousands_separators_are_removed_from_numbers_only(question, payload, c
     assert row["answer_value"] == expected
 
 
+@pytest.mark.parametrize("value,expected", [("1.3333333333333333", "1.33"), ("13.0208333333", "13"),
+                                            ("-24.705148514851", "-24.7"), ("1234.5678912", "1230"),
+                                            ("150.4", "150.4"), ("2.907", "2.907"), ("754.66", "754.66"),
+                                            ("0.00000123", "0.00000123"), ("(1.3333333,2)", "(1.3333333,2)")])
+def test_only_full_precision_calculator_output_is_rounded(question, payload, chunks, value, expected):
+    row = validate_answer(question, json.dumps({**payload, "answer_value": value}), chunks)
+    assert row["answer_value"] == expected
+
+
 def test_validation_retry_tells_the_model_what_was_rejected(question, chunks, payload):
     bad = json.dumps({**payload, "evidence": [{"chunk_id": "c1", "quote": "Training used a lot."}]})
     client = mock_client(json.dumps(payload))
