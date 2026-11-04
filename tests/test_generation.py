@@ -369,3 +369,125 @@ def test_nonlength_incomplete_response_is_not_retried(question, chunks, payload)
     with pytest.raises(GenerationValidationError):
         generation.generate_answer(question, chunks, model="fake", client=client)
     assert client.chat.completions.create.call_count == 1
+
+
+@pytest.mark.parametrize("value,expected", [("100,000", "100000"), ("-1,234,567.5", "-1234567.5"),
+                                            ("(2,5)", "(2,5)"), ("10,00", "10,00"), ("net zero", "net zero")])
+def test_thousands_separators_are_removed_from_numbers_only(question, payload, chunks, value, expected):
+    row = validate_answer(question, json.dumps({**payload, "answer_value": value}), chunks)
+    assert row["answer_value"] == expected
+
+
+def test_validation_retry_tells_the_model_what_was_rejected(question, chunks, payload):
+    bad = json.dumps({**payload, "evidence": [{"chunk_id": "c1", "quote": "Training used a lot."}]})
+    client = mock_client(json.dumps(payload))
+    success = client.chat.completions.create.return_value
+    rejected = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=bad))])
+    client.chat.completions.create.side_effect = [rejected, success]
+    trace = {}
+    row, raw = generation.generate_answer(question, chunks, model="fake", client=client, trace=trace)
+    first, second = [call.kwargs["messages"] for call in client.chat.completions.create.call_args_list]
+    assert len(first) == 2 and second[:2] == first
+    assert second[2] == {"role": "assistant", "content": bad}
+    assert "absent from its cited passage" in second[3]["content"]
+    assert "absent" in trace["attempts"][0]["rejected"]
+    assert row == validate_answer(question, raw, chunks)
+
+
+@pytest.mark.parametrize("retries,expected_calls", [(0, 1), (1, 2), (2, 3)])
+def test_validation_retries_are_bounded_and_keep_the_raw_reply(question, chunks, payload, retries, expected_calls):
+    bad = json.dumps({**payload, "evidence": []})
+    client = mock_client(bad)
+    with pytest.raises(GenerationValidationError) as caught:
+        generation.generate_answer(question, chunks, model="fake", client=client, validation_retries=retries)
+    assert client.chat.completions.create.call_count == expected_calls
+    assert caught.value.raw_response == bad
+
+
+class RankedRetriever(FakeRetriever):
+    def __init__(self, *rankings):
+        super().__init__()
+        self.rankings, self.queries = list(rankings), []
+
+    def search(self, queries, k):
+        self.searches += 1
+        self.queries.append(queries)
+        return [self.rankings.pop(0)[:k] for _ in queries]
+
+
+@pytest.fixture
+def two_chunks(chunks):
+    other = Chunk("other", "GPT-3 used 2.50 MWh in training.", (), [1], "text", [], chunk_id="c2",
+                  metadata={"ref_id": "other2020", "url": "https://example.org/other.pdf"})
+    return chunks + [other]
+
+
+ABSTAIN = json.dumps({"answer": "Unknown", "answer_value": "is_blank", "explanation": "GPT-3 energy is missing.",
+                      "evidence": []})
+
+
+def followup_run(tmp_path, question, chunks, retriever, generate, followup):
+    settings = {"top_k": 1, "questions": [question], "followup_k": 5}
+    code = runner.run_questions([question], chunks, retriever, generate, tmp_path, settings, followup=followup)
+    return code, json.loads(next((tmp_path / "answers").glob("*.json")).read_text())
+
+
+def test_abstention_searches_for_what_is_missing_and_answers(tmp_path, question, two_chunks, payload):
+    def generate(q, context):
+        raw = json.dumps(payload) if len(context) > 1 else ABSTAIN
+        return validate_answer(q, raw, context), raw
+    followup = Mock(return_value=["GPT-3 training energy"])
+    retriever = RankedRetriever([0], [0, 1])
+    code, record = followup_run(tmp_path, question, two_chunks, retriever, generate, followup)
+    assert code == 0 and record["row"]["answer_value"] == "1.25"
+    assert record["passage_ids"] == ["c1", "c2"]  # already-seen passages are not sent twice
+    assert retriever.queries[1] == ["GPT-3 training energy"]
+    followup.assert_called_once_with(question, "GPT-3 energy is missing.")
+    assert record["followup"]["first_response"] == ABSTAIN and record["followup"]["first_passage_ids"] == ["c1"]
+
+
+def test_answered_questions_never_search_again(tmp_path, question, chunks, payload):
+    def generate(q, context):
+        return validate_answer(q, json.dumps(payload), context), json.dumps(payload)
+    followup = Mock()
+    code, record = followup_run(tmp_path, question, chunks, RankedRetriever([0]), generate, followup)
+    assert code == 0 and record["followup"] is None
+    followup.assert_not_called()
+
+
+@pytest.mark.parametrize("queries,rankings", [([], [[0]]), (["same chunk again"], [[0], [0]])])
+def test_abstention_stands_when_the_search_adds_nothing(tmp_path, question, chunks, queries, rankings):
+    generate = Mock(side_effect=lambda q, context: (validate_answer(q, ABSTAIN, context), ABSTAIN))
+    code, record = followup_run(tmp_path, question, chunks, RankedRetriever(*rankings), generate,
+                                Mock(return_value=queries))
+    assert code == 0 and record["row"]["answer_value"] == "is_blank"
+    assert generate.call_count == 1 and record["passage_ids"] == ["c1"]
+
+
+def test_rejected_second_answer_keeps_the_first_abstention(tmp_path, question, two_chunks):
+    def generate(q, context):
+        if len(context) > 1:
+            raise GenerationValidationError("evidence quote is absent from its cited passage")
+        return validate_answer(q, ABSTAIN, context), ABSTAIN
+    code, record = followup_run(tmp_path, question, two_chunks, RankedRetriever([0], [1]), generate,
+                                Mock(return_value=["GPT-3 training energy"]))
+    assert code == 0 and record["row"]["answer_value"] == "is_blank" and record["passage_ids"] == ["c1"]
+    assert "absent" in record["followup"]["rejected"]
+    assert not json.loads((tmp_path / "errors.json").read_text())
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ('{"queries": [" GPT-3 energy ", "US household use", "GPT-3 energy", "third", 7]}',
+     ["GPT-3 energy", "US household use"]),
+    ('{"queries": "GPT-3 energy"}', []), ("[]", []), ("not json", []), (None, []),
+])
+def test_followup_queries_are_cleaned_capped_and_never_fail_the_answer(question, raw, expected):
+    assert generation.followup_queries(question, "missing", model="fake", client=mock_client(raw)) == expected
+
+
+def test_followup_prompt_only_sees_the_question_and_explanation(question):
+    client = mock_client('{"queries": []}')
+    generation.followup_queries({**question, "answer_value": "SECRET_GOLD"}, "missing", model="fake", client=client)
+    args = client.chat.completions.create.call_args.kwargs
+    assert json.loads(args["messages"][1]["content"]) == {"question": question["question"], "explanation": "missing"}
+    assert args["temperature"] == 0 and "SECRET_GOLD" not in json.dumps(args)

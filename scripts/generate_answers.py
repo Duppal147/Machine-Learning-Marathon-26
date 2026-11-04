@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from wattbot import config
 from wattbot.chunking import ChunkStore
 from wattbot.embeddings import create_embedding_client
-from wattbot.generation import (COLUMNS, SYSTEM_PROMPT, GenerationValidationError, generate_answer, load_input_questions,
+from wattbot.generation import (COLUMNS, FOLLOWUP_PROMPT, SYSTEM_PROMPT, followup_queries, GenerationValidationError, generate_answer, load_input_questions,
                                 passage_context, validate_answer, validate_predictions)
 
 
@@ -98,8 +98,28 @@ def build_retriever(args, chunks, corpus_hash):
     return retriever
 
 
+def search_again(question, row, raw, context, chunks, retriever, generate, followup, per_query):
+    """Give an abstention one more chance: search for what it says is missing, then re-ask."""
+    queries = followup(question, row["explanation"])
+    record = {"queries": queries, "first_response": raw, "first_passage_ids": [c.chunk_id for c in context]}
+    seen, extra = {c.chunk_id for c in context}, []
+    for ranked in retriever.search(queries, per_query) if queries else []:
+        for index in ranked:
+            if chunks[index].chunk_id not in seen:
+                seen.add(chunks[index].chunk_id)
+                extra.append(chunks[index])
+    if not extra:
+        return row, raw, context, record
+    try:
+        new_row, new_raw = generate(question, context + extra)
+    except GenerationValidationError as error:
+        record["rejected"] = str(error)  # The first abstention is still a valid answer.
+        return row, raw, context, record
+    return new_row, new_raw, context + extra, record
+
+
 def run_questions(questions, chunks, retriever, generate, run_dir, settings, *, resume=False,
-                  generation_trace=None):
+                  generation_trace=None, followup=None):
     """Checkpoint validated answers atomically. Retry failed IDs on resume, never fill fake rows."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +168,11 @@ def run_questions(questions, chunks, retriever, generate, run_dir, settings, *, 
                     raise ValueError("retriever returned the wrong number of query results")
                 context = [chunks[index] for index in ranked[0]]
                 row, raw = generate(question, context)
+                followup_record = None
+                if followup is not None and row["answer_value"] == "is_blank":
+                    row, raw, context, followup_record = search_again(
+                        question, row, raw, context, chunks, retriever, generate, followup,
+                        settings["followup_k"])
                 # Validate even injected generators before a checkpoint becomes trusted.
                 if row != validate_answer(question, raw, context):
                     raise ValueError("generator row differs from its validated response")
@@ -155,6 +180,7 @@ def run_questions(questions, chunks, retriever, generate, run_dir, settings, *, 
                                        "passage_ids": [c.chunk_id for c in context],
                                        "passages": passage_context(context),
                                        "generation": dict(generation_trace or {}),
+                                       "followup": followup_record,
                                        "seconds": round(time.monotonic() - started, 3)})
                 rows.append(row)
                 print(f"[{position}/{len(questions)}] {question['id']}: saved ({time.monotonic()-started:.1f}s)",
@@ -217,6 +243,11 @@ def main(argv=None):
     parser.add_argument("--max-output-tokens", type=positive, default=8192)
     parser.add_argument("--length-retries", type=int, choices=(0, 1, 2), default=1,
                         help="retry truncated responses with twice the token budget (default: once)")
+    parser.add_argument("--validation-retries", type=int, choices=(0, 1, 2), default=1,
+                        help="re-ask with the error when a reply fails validation (default: once)")
+    parser.add_argument("--followup-queries", type=int, choices=(0, 1, 2, 3), default=0,
+                        help="after an abstention, search this many missing facts and re-ask (default: off)")
+    parser.add_argument("--followup-k", type=positive, default=5, help="passages each follow-up query adds at most")
     parser.add_argument("--no-query-instruction", action="store_true")
     parser.add_argument("--limit", type=positive)
     parser.add_argument("--resume", action="store_true")
@@ -244,7 +275,9 @@ def main(argv=None):
     settings = {"questions": questions, "corpus_sha256": corpus_hash, "snapshot_tag": args.snapshot_tag,
                 "chat_model": args.chat_model, "base_url": config.BASE_URL, "temperature": 0,
                 "max_output_tokens": args.max_output_tokens, "length_retries": args.length_retries,
-                "retriever": args.retriever,
+                "validation_retries": args.validation_retries, "retriever": args.retriever,
+                "followup_queries": args.followup_queries, "followup_k": args.followup_k,
+                "followup_prompt_sha256": fingerprint(FOLLOWUP_PROMPT),
                 "strategy": args.strategy, "embedding_model": config.EMBEDDING_MODEL,
                 "query_instruction": None if args.no_query_instruction else config.QUERY_INSTRUCTION,
                 "chroma_dir": str(Path(config.CHROMA_DIR).resolve()),
@@ -263,9 +296,13 @@ def main(argv=None):
             client = create_embedding_client().with_options(max_retries=0)
         return generate_answer(question, passages, model=args.chat_model, client=client,
                                max_tokens=args.max_output_tokens, length_retries=args.length_retries,
-                               trace=generation_trace)
+                               validation_retries=args.validation_retries, trace=generation_trace)
+    def followup(question, explanation):
+        return followup_queries(question, explanation, model=args.chat_model, client=client,
+                                limit=args.followup_queries, max_tokens=args.max_output_tokens,
+                                length_retries=args.length_retries)
     return run_questions(questions, chunks, retriever, generate, args.run_dir, settings, resume=args.resume,
-                         generation_trace=generation_trace)
+                         generation_trace=generation_trace, followup=followup if args.followup_queries else None)
 
 
 if __name__ == "__main__":
