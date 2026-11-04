@@ -30,6 +30,12 @@ def extract_arxiv_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def pinned_pdf_url(url: str, fallback: str) -> str:
+    """Keep a version named in the URL: revisions move numbers, and answers cite that version."""
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/([a-zA-Z.\-]*/?\d{4,7}(?:\.\d+)?v\d+)", url)
+    return f"https://arxiv.org/pdf/{m.group(1)}" if m else fallback
+
+
 def fetch_arxiv_metadata(arxiv_id: str) -> dict:
     resp = requests.get(ARXIV_API, params={"id_list": arxiv_id}, headers=HEADERS, timeout=30)
     resp.raise_for_status()
@@ -148,7 +154,7 @@ def main():
                     row["published"] = meta["published"]
                     row["doi"] = meta["doi"]
 
-                    download_pdf(meta["pdf_url"], dest)
+                    download_pdf(pinned_pdf_url(url, meta["pdf_url"]), dest)
                     row["status"] = "ok"
             else:
                 row["source_type"] = "direct"
