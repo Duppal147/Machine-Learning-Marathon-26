@@ -143,6 +143,27 @@ Private test labels remain hidden. Checkpoints, splits, CSVs and receipts stay i
 the ignored local `documents/runs/` directory; no downloaded competition data or
 generated outputs are included in the source change.
 
+## Recorded results (2026-11-05)
+
+| Run | Change | Local train (245) | Kaggle public | Abstentions (317) |
+|---|---|---:|---:|---:|
+| `test-baseline` | The baseline above | not recorded | 0.823 | 43 |
+| `test-v4` | Answer format, validation retry, follow-up search, top 10, `hybrid_fig` | 0.884 | 0.897 | 28 |
+| `test-v5` | Pinned arXiv versions, table expansion, rounding of calculator output | 0.924 | 0.912 | 27 |
+
+Settings were chosen on all 245 training questions, not a sealed holdout, so train
+scores are optimistic. The 0.924 merges partial reruns of the affected questions rather
+than one full run. Kaggle submissions: `57998153` (`test-v4-submission`), `58005999`
+(`test-v5-submission`). The `test-v5` corpus hash starts `e93438d2d7addbc7`:
+
+```bash
+OPENAI_API_KEY="op://<vault>/<item>/<field>" \
+op run -- uv run --with sentence-transformers python scripts/generate_answers.py \
+  --questions WattBot2026/test_Q.csv --run-dir documents/runs/test-v5 \
+  --chat-model qwen3.8-27b --length-retries 2 --top-k 10 --followup-queries 2 \
+  --strategy hybrid_fig --expand-tables 3
+```
+
 ## Table expansion
 
 A short table chunk often ranks below the prose that cites it. `--expand-tables N` adds
