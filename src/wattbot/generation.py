@@ -4,6 +4,8 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
+from decimal import Decimal
 from pathlib import Path
 
 from .chunking import Chunk
@@ -18,7 +20,11 @@ Return one JSON object with exactly these fields:
   answer: a concise natural-language answer (string)
   answer_value: the requested value or term, as a string without units or approximation
     symbols. Preserve numeric precision and convert to the supplied expected unit when
-    necessary. For True/False use \"1\"/\"0\". If multiple values or range endpoints are
+    necessary; the expected unit sets the scale even if the question names another, e.g.
+    2.5 million with expected unit liters is \"2500000\". Write numbers as plain digits
+    without thousands separators. For a term, give only the shortest phrase from the
+    passage that answers the question, with no extra qualifiers and not a full sentence.
+    For True/False use \"1\"/\"0\". If multiple values or range endpoints are
     requested, return all of them in parentheses, e.g. \"(2,5)\".
   explanation: a concise evidence-based justification, including any calculation (string)
   evidence: a list of objects with chunk_id and quote. Copy each quote verbatim from
@@ -26,6 +32,16 @@ Return one JSON object with exactly these fields:
 If the supplied evidence is insufficient, set answer_value to \"is_blank\", evidence to
 [], and explain the limitation. Do not guess. Never fabricate a quote.
 Return only JSON, without Markdown."""
+FOLLOWUP_PROMPT = """A question could not be answered from the passages found so far. Write
+search queries for the specific missing facts named in the explanation. Each query is a short
+standalone search for one fact, naming the entity and metric. Do not answer the question or
+invent values. Return one JSON object: {"queries": ["..."]}, without Markdown."""
+
+
+_THOUSANDS = re.compile(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_CALCULATOR_OUTPUT = re.compile(r"-?\d+\.\d{7,}")
+_TABLE_LABEL = re.compile(r"\W*table\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
+_TABLE_MENTION = re.compile(r"\b(?:table|tab\.)\s+([ivxlc]+|\d+)\b", re.IGNORECASE)
 
 
 class GenerationValidationError(ValueError):
@@ -53,6 +69,23 @@ def passage_context(passages: list[Chunk]) -> list[dict]:
              "title": c.metadata.get("title"), "pages": c.pages, "text": c.text} for c in passages]
 
 
+def referenced_tables(passages: list[Chunk], chunks: list[Chunk], limit: int) -> list[Chunk]:
+    """Return tables the passages mention. A short table chunk ranks below the prose citing it."""
+    tables: dict[tuple[str, str], list[Chunk]] = {}
+    for chunk in chunks:
+        label = _TABLE_LABEL.match(chunk.text[:80])
+        if label and "|" in chunk.text:
+            tables.setdefault((chunk.doc_id, label.group(1).upper()), []).append(chunk)
+    seen, added = {c.chunk_id for c in passages}, []
+    for passage in passages:
+        for mention in _TABLE_MENTION.finditer(passage.text):
+            for table in tables.get((passage.doc_id, mention.group(1).upper()), []):
+                if table.chunk_id not in seen and len(added) < limit:
+                    seen.add(table.chunk_id)
+                    added.append(table)
+    return added
+
+
 def validate_answer(question: dict, raw_response: str, passages: list[Chunk]) -> dict[str, str]:
     """Check JSON, citations and literal quotations; derive source IDs/URLs ourselves.
 
@@ -72,6 +105,13 @@ def validate_answer(question: dict, raw_response: str, passages: list[Chunk]) ->
         raise GenerationValidationError("evidence must be a list")
     row = {key: question[key] for key in ("id", "question", "answer_unit")}
     row.update({key: payload[key].strip() for key in ("answer", "answer_value", "explanation")})
+    if _THOUSANDS.fullmatch(row["answer_value"]):
+        # The scorer parses numbers with float(), which rejects "100,000".
+        row["answer_value"] = row["answer_value"].replace(",", "")
+    if _CALCULATOR_OUTPUT.fullmatch(row["answer_value"]) and sum(
+            c.isdigit() for c in row["answer_value"].lstrip("-0.")) >= 7:
+        # No paper prints 1.3333333; a division reported at full precision misses a 3-figure gold.
+        row["answer_value"] = format(Decimal(f"{float(row['answer_value']):.3g}").normalize(), "f")
     if row["answer_value"] == "is_blank":
         if evidence:
             raise GenerationValidationError("an abstention must have empty evidence")
@@ -114,23 +154,9 @@ def validate_answer(question: dict, raw_response: str, passages: list[Chunk]) ->
     return row
 
 
-def generate_answer(question: dict, passages: list[Chunk], *, model: str, client=None,
-                    max_tokens: int = 8192, length_retries: int = 1,
-                    trace: dict | None = None) -> tuple[dict[str, str], str]:
-    """Return a validated row and raw response; errors never become abstentions."""
-    if not model or not model.strip():
-        raise ValueError("a chat model must be selected explicitly")
-    if length_retries not in (0, 1, 2):
-        raise ValueError("length_retries must be 0, 1 or 2")
-    client = client if client is not None else create_embedding_client().with_options(max_retries=0)
-    # Whitelist again so even callers passing a full training row cannot leak gold fields.
-    input_data = {key: question[key] for key in ("question", "answer_unit")}
-    input_data["passages"] = passage_context(passages)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(input_data, ensure_ascii=False)}]
-    attempts = []
-    if trace is not None:
-        trace["attempts"] = attempts
+def _complete(client, model: str, messages: list[dict], max_tokens: int, length_retries: int,
+              attempts: list[dict]) -> str:
+    """Return one finished reply, growing only the completion budget if it is truncated."""
     for attempt in range(length_retries + 1):
         budget = max_tokens * (2 ** attempt)
         detail = {"max_output_tokens": budget}
@@ -153,13 +179,59 @@ def generate_answer(question: dict, passages: list[Chunk], *, model: str, client
                                               "check the output-token budget or model settings")
             error.raw_response = raw
             raise error
-        break
+        return raw
+
+
+def generate_answer(question: dict, passages: list[Chunk], *, model: str, client=None,
+                    max_tokens: int = 8192, length_retries: int = 1, validation_retries: int = 1,
+                    trace: dict | None = None) -> tuple[dict[str, str], str]:
+    """Return a validated row and raw response; errors never become abstentions."""
+    if not model or not model.strip():
+        raise ValueError("a chat model must be selected explicitly")
+    if length_retries not in (0, 1, 2):
+        raise ValueError("length_retries must be 0, 1 or 2")
+    if validation_retries not in (0, 1, 2):
+        raise ValueError("validation_retries must be 0, 1 or 2")
+    client = client if client is not None else create_embedding_client().with_options(max_retries=0)
+    # Whitelist again so even callers passing a full training row cannot leak gold fields.
+    input_data = {key: question[key] for key in ("question", "answer_unit")}
+    input_data["passages"] = passage_context(passages)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(input_data, ensure_ascii=False)}]
+    attempts = []
+    if trace is not None:
+        trace["attempts"] = attempts
+    for retry in range(validation_retries + 1):
+        raw = _complete(client, model, messages, max_tokens, length_retries, attempts)
+        try:
+            return validate_answer(question, raw, passages), raw
+        except GenerationValidationError as error:
+            error.raw_response = raw
+            attempts[-1]["rejected"] = str(error)
+            if retry == validation_retries:
+                raise
+            # Temperature 0 repeats a rejected reply, so the retry must say what was wrong.
+            messages = messages + [
+                {"role": "assistant", "content": raw or ""},
+                {"role": "user", "content": f"That reply was rejected: {error}. Return the corrected "
+                                            "JSON object, copying every quote exactly from its passage."}]
+
+
+def followup_queries(question: dict, explanation: str, *, model: str, client, limit: int = 2,
+                     max_tokens: int = 8192, length_retries: int = 1) -> list[str]:
+    """Ask what to search for after an abstention; an unusable reply means no second search."""
+    input_data = {"question": question["question"], "explanation": explanation}
+    messages = [{"role": "system", "content": FOLLOWUP_PROMPT},
+                {"role": "user", "content": json.dumps(input_data, ensure_ascii=False)}]
     try:
-        row = validate_answer(question, raw, passages)
-    except GenerationValidationError as error:
-        error.raw_response = raw
-        raise
-    return row, raw
+        payload = json.loads(_complete(client, model, messages, max_tokens, length_retries, []))
+    except (GenerationValidationError, TypeError, ValueError):
+        return []
+    queries = payload.get("queries") if isinstance(payload, dict) else None
+    if not isinstance(queries, list):
+        return []
+    cleaned = [q.strip() for q in queries if isinstance(q, str) and q.strip()]
+    return list(dict.fromkeys(cleaned))[:limit]
 
 
 def validate_predictions(questions: list[dict], rows: list[dict]) -> None:

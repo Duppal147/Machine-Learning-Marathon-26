@@ -58,7 +58,8 @@ uv run python scripts/download_papers.py WattBot2026/metadata.csv \
 ```
 - Always pass both flags. The defaults (`pdfs/`, `metadata.csv`) don't match where the later steps look.
 - `metadata_downloaded.csv` maps each PDF file name to its WattBot `ref_id` (e.g. `amazon2023`). Chunking uses it to attach citations.
-- Files that already exist are skipped, so re-running only fetches what's missing.
+- Files that already exist are skipped, so re-running only fetches what's missing. That includes a PDF of the wrong arXiv version from an older download.
+- A version named in `metadata.csv` is the one downloaded, because gold answers were read from it. After parsing, `uv run python scripts/check_corpus_versions.py` exits 1 if a parsed paper is another version.
 
 ## Step 2: Parse PDFs with Docling
 ```bash
